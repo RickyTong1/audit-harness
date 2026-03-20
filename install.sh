@@ -56,6 +56,19 @@ fi
 
 PROJECT="$(cd "$PROJECT" && pwd)"
 
+# 自保护：禁止安装到 harness 包自身
+if [[ "$PROJECT" == "$HARNESS_ROOT" ]]; then
+    echo ""
+    echo -e "${RED}错误: 不能安装到 audit-harness 包自身。${RESET}"
+    echo ""
+    echo "  用法:"
+    echo "    bash $0 /path/to/your/project          # 指定目标项目"
+    echo "    bash $0 --auto /path/to/your/project    # 全自动安装到指定项目"
+    echo "    cd /your/project && bash $HARNESS_ROOT/install.sh  # 安装到当前目录"
+    echo ""
+    exit 1
+fi
+
 # ==========================================
 # Step 1: 环境检测
 # ==========================================
