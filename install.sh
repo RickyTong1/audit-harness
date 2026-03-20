@@ -2,195 +2,224 @@
 # ============================================================
 # audit-harness 安装向导
 # ============================================================
-# 所有文件统一安装到 $PROJECT/.claude/ 下：
-#   .claude/audit-harness/     — 核心代码 + 配置
-#   .claude/skills/            — Skills
-#   .claude/runs/              — 审计数据存储
-#   CLAUDE.md                  — 审计规范注入（唯一在项目根目录的修改）
 #
-# 用法:
-#   bash install.sh /path/to/project          # 交互模式
-#   bash install.sh --auto /path/to/project   # 全自动模式
+# 两种模式:
+#
+#   bash install.sh --global
+#     全局安装到 ~/.claude/
+#     Skills + 核心代码 → 所有项目自动可用
+#     只需执行一次
+#
+#   bash install.sh --init [/path/to/project]
+#     项目初始化
+#     创建 .claude/runs/ + audit_config.py + 注入 CLAUDE.md
+#     每个新项目执行一次
+#
+#   bash install.sh --auto [/path/to/project]
+#     全局安装 + 项目初始化，一步到位
+#
 # ============================================================
 
 set -euo pipefail
 
-# ==========================================
-# 路径
-# ==========================================
 HARNESS_ROOT="$(cd "$(dirname "$0")" && pwd)"
 SKILLS_SRC="$HARNESS_ROOT/skills"
 LIB_SRC="$HARNESS_ROOT/lib"
 TEMPLATES_SRC="$HARNESS_ROOT/templates"
 
-# ==========================================
-# 颜色
-# ==========================================
-GREEN='\033[92m'
-YELLOW='\033[93m'
-RED='\033[91m'
-BOLD='\033[1m'
-DIM='\033[2m'
-RESET='\033[0m'
+GLOBAL_DIR="$HOME/.claude"
 
-ok()   { echo -e "    ${GREEN}✅${RESET} $*"; }
-warn() { echo -e "    ${YELLOW}⚠️${RESET}  $*"; }
-fail() { echo -e "    ${RED}❌${RESET} $*"; }
+GREEN='\033[92m'  YELLOW='\033[93m'  RED='\033[91m'
+BOLD='\033[1m'    DIM='\033[2m'      RESET='\033[0m'
+
+ok()     { echo -e "    ${GREEN}✅${RESET} $*"; }
+fail()   { echo -e "    ${RED}❌${RESET} $*"; }
 header() { echo -e "\n${BOLD}--- $* ---${RESET}\n"; }
 
 # ==========================================
 # 参数解析
 # ==========================================
-AUTO=false
+MODE=""
 PROJECT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --auto) AUTO=true; shift ;;
-        *)      PROJECT="$1"; shift ;;
+        --global) MODE="global"; shift ;;
+        --init)   MODE="init";   shift ;;
+        --auto)   MODE="auto";   shift ;;
+        --help|-h)
+            echo "用法:"
+            echo "  bash install.sh --global              全局安装（Skills + 核心代码 → ~/.claude/）"
+            echo "  bash install.sh --init [project_dir]  项目初始化（runs/ + 配置 + CLAUDE.md）"
+            echo "  bash install.sh --auto [project_dir]  全局 + 项目初始化，一步到位"
+            exit 0
+            ;;
+        *) PROJECT="$1"; shift ;;
     esac
 done
 
-if [[ -z "$PROJECT" ]]; then
-    PROJECT="$(pwd)"
-fi
-
-PROJECT="$(cd "$PROJECT" && pwd)"
-
-# 安装目标目录
-CLAUDE_DIR="$PROJECT/.claude"
-INSTALL_DIR="$CLAUDE_DIR/audit-harness"
-SKILLS_DST="$CLAUDE_DIR/skills"
-RUNS_DIR="$CLAUDE_DIR/runs"
-
-# 自保护
-if [[ "$PROJECT" == "$HARNESS_ROOT" ]]; then
-    echo ""
-    echo -e "${RED}错误: 不能安装到 audit-harness 包自身。${RESET}"
-    echo ""
-    echo "  用法:"
-    echo "    bash $0 /path/to/your/project          # 指定目标项目"
-    echo "    bash $0 --auto /path/to/your/project    # 全自动安装到指定项目"
-    echo ""
+if [[ -z "$MODE" ]]; then
+    echo -e "${RED}错误: 请指定模式 --global, --init, 或 --auto${RESET}"
+    echo "  bash install.sh --help 查看用法"
     exit 1
 fi
 
-# ==========================================
-# Step 1: 环境检测
-# ==========================================
-step1_detect() {
+if [[ "$MODE" == "init" || "$MODE" == "auto" ]]; then
+    PROJECT="${PROJECT:-$(pwd)}"
+    PROJECT="$(cd "$PROJECT" && pwd)"
+    if [[ "$PROJECT" == "$HARNESS_ROOT" ]]; then
+        echo -e "${RED}错误: 不能安装到 audit-harness 包自身。${RESET}"
+        exit 1
+    fi
+fi
+
+# ============================================================
+# 全局安装
+# ============================================================
+install_global() {
     echo ""
     echo -e "${BOLD}============================================================${RESET}"
-    echo -e "${BOLD}  audit-harness 安装向导${RESET}"
+    echo -e "${BOLD}  audit-harness 全局安装${RESET}"
+    echo -e "${BOLD}============================================================${RESET}"
+    echo ""
+    echo "  安装目标: $GLOBAL_DIR/"
+    echo ""
+
+    # --- 检测 ---
+    echo "  环境检测:"
+    local has_core=false has_skills=false
+    [[ -f "$GLOBAL_DIR/audit-harness/audit_context.py" ]] && has_core=true
+    [[ -d "$GLOBAL_DIR/skills/audit-start" ]] && has_skills=true
+
+    if $has_core; then
+        echo -e "    ${GREEN}✅ 已存在${RESET}    ~/.claude/audit-harness/（将更新）"
+    else
+        echo -e "    ${YELLOW}❌ 需要安装${RESET}  ~/.claude/audit-harness/"
+    fi
+    if $has_skills; then
+        echo -e "    ${GREEN}✅ 已存在${RESET}    ~/.claude/skills/audit-*（将更新）"
+    else
+        echo -e "    ${YELLOW}❌ 需要安装${RESET}  ~/.claude/skills/audit-*"
+    fi
+
+    # --- 安装核心代码 ---
+    header "安装核心代码 → ~/.claude/audit-harness/"
+
+    local install_dir="$GLOBAL_DIR/audit-harness"
+    mkdir -p "$install_dir"
+
+    cp "$LIB_SRC/audit_context.py" "$install_dir/audit_context.py"
+    ok "audit_context.py"
+
+    # __init__.py
+    cat > "$install_dir/__init__.py" << 'PYEOF'
+"""audit-harness: 审计执行保障框架（全局安装）"""
+PYEOF
+    ok "__init__.py"
+
+    # 模板文件（供 --init 使用）
+    mkdir -p "$install_dir/templates"
+    cp "$TEMPLATES_SRC/audit_config.example.py" "$install_dir/templates/"
+    cp "$TEMPLATES_SRC/CLAUDE.md.audit-section" "$install_dir/templates/"
+    ok "templates/"
+
+    # --- 安装 Skills ---
+    header "安装 Skills → ~/.claude/skills/"
+
+    local skills_dst="$GLOBAL_DIR/skills"
+    mkdir -p "$skills_dst"
+
+    local installed=0
+    for skill_dir in "$SKILLS_SRC"/*/; do
+        local name
+        name=$(basename "$skill_dir")
+        [[ "$name" == "audit-init" ]] && continue
+        [[ ! -f "$skill_dir/SKILL.md" ]] && continue
+
+        local dst="$skills_dst/$name"
+        rm -rf "$dst"
+        cp -r "$skill_dir" "$dst"
+
+        local short_name="${name#audit-}"
+        ok "/$short_name → ~/.claude/skills/$name"
+        ((installed++))
+    done
+    echo ""
+    echo "    已安装 $installed 个 Skills（全局可用）"
+
+    # --- 总结 ---
+    echo ""
+    echo -e "${BOLD}============================================================${RESET}"
+    echo -e "${GREEN}${BOLD}  全局安装完成！${RESET}"
+    echo -e "${BOLD}============================================================${RESET}"
+    echo ""
+    echo "  已安装:"
+    echo "    ~/.claude/audit-harness/  — 核心代码 + 模板"
+    echo "    ~/.claude/skills/         — 4 个 Skills（所有项目可用）"
+    echo ""
+    echo "  下一步: 在项目中执行初始化:"
+    echo "    bash install.sh --init /path/to/your/project"
+    echo ""
+    echo -e "${BOLD}============================================================${RESET}"
+}
+
+# ============================================================
+# 项目初始化
+# ============================================================
+
+# 配置收集变量
+CFG_SCRIPTS=""
+CFG_ASSETS=""
+CFG_PROMPT_GLOB=""
+
+init_project() {
+    echo ""
+    echo -e "${BOLD}============================================================${RESET}"
+    echo -e "${BOLD}  audit-harness 项目初始化${RESET}"
     echo -e "${BOLD}============================================================${RESET}"
     echo ""
     echo "  目标项目: $PROJECT"
-    echo "  安装目录: .claude/audit-harness/"
     echo ""
-    echo "  环境检测:"
 
-    HAS_GIT=false;           [[ -d "$PROJECT/.git" ]] && HAS_GIT=true
-    HAS_CORE=false;          [[ -f "$INSTALL_DIR/audit_context.py" ]] && HAS_CORE=true
-    HAS_CONFIG=false;        [[ -f "$INSTALL_DIR/audit_config.py" ]] && HAS_CONFIG=true
-    HAS_RUNS=false;          [[ -d "$RUNS_DIR" ]] && HAS_RUNS=true
-    HAS_CLAUDE_MD=false;     [[ -f "$PROJECT/CLAUDE.md" ]] && HAS_CLAUDE_MD=true
-    HAS_AUDIT_SECTION=false; $HAS_CLAUDE_MD && grep -q "\[AUDIT\]" "$PROJECT/CLAUDE.md" 2>/dev/null && grep -q "audit_blocks" "$PROJECT/CLAUDE.md" 2>/dev/null && HAS_AUDIT_SECTION=true
-    HAS_SKILLS=false;        [[ -d "$SKILLS_DST/audit-start" ]] && HAS_SKILLS=true
+    # 检查全局安装是否存在
+    if [[ ! -f "$GLOBAL_DIR/audit-harness/audit_context.py" ]]; then
+        echo -e "${YELLOW}  ⚠️  全局安装未检测到，将同时执行全局安装...${RESET}"
+        echo ""
+        install_global
+        echo ""
+        echo -e "${BOLD}  继续项目初始化...${RESET}"
+        echo ""
+    fi
+
+    local proj_claude="$PROJECT/.claude"
+    local proj_runs="$proj_claude/runs"
+
+    # --- 检测 ---
+    echo "  环境检测:"
+    local has_git=false has_runs=false has_config=false has_claude=false has_audit=false
+    [[ -d "$PROJECT/.git" ]] && has_git=true
+    [[ -d "$proj_runs" ]] && has_runs=true
+    [[ -f "$proj_claude/audit_config.py" ]] && has_config=true
+    [[ -f "$PROJECT/CLAUDE.md" ]] && has_claude=true
+    $has_claude && grep -q "\[AUDIT\]" "$PROJECT/CLAUDE.md" 2>/dev/null && has_audit=true
 
     _check() {
         if $2; then
             echo -e "    ${GREEN}✅ 已存在${RESET}    $1"
         else
-            echo -e "    ${YELLOW}❌ 需要安装${RESET}  $1"
+            echo -e "    ${YELLOW}❌ 需要配置${RESET}  $1"
         fi
     }
 
-    _check "Git 仓库"                        "$HAS_GIT"
-    _check ".claude/audit-harness/核心代码"   "$HAS_CORE"
-    _check ".claude/audit-harness/项目配置"   "$HAS_CONFIG"
-    _check ".claude/runs/ 审计存储"           "$HAS_RUNS"
-    _check "CLAUDE.md"                        "$HAS_CLAUDE_MD"
-    _check "CLAUDE.md 审计规范"               "$HAS_AUDIT_SECTION"
-    _check ".claude/skills/ (4 个 Skill)"     "$HAS_SKILLS"
+    _check "Git 仓库"                     "$has_git"
+    _check ".claude/audit_config.py"      "$has_config"
+    _check ".claude/runs/"                "$has_runs"
+    _check "CLAUDE.md"                    "$has_claude"
+    _check "CLAUDE.md 审计规范"            "$has_audit"
 
-    echo ""
-    local needs=0
-    $HAS_GIT            || ((needs++)) || true
-    $HAS_CORE           || ((needs++)) || true
-    $HAS_CONFIG         || ((needs++)) || true
-    $HAS_RUNS           || ((needs++)) || true
-    $HAS_CLAUDE_MD      || ((needs++)) || true
-    $HAS_AUDIT_SECTION  || ((needs++)) || true
-    $HAS_SKILLS         || ((needs++)) || true
+    # --- 自动收集配置 ---
+    header "收集项目配置"
 
-    if [[ $needs -eq 0 ]]; then
-        echo -e "  ${GREEN}所有组件已安装。重新运行将更新到最新版本。${RESET}"
-    else
-        echo "  需要安装/配置 $needs 个组件。"
-    fi
-}
-
-# ==========================================
-# Step 2: 收集项目配置
-# ==========================================
-CFG_SCRIPTS=""
-CFG_ASSETS=""
-CFG_PROMPT_GLOB=""
-
-step2_collect() {
-    header "Step 2: 项目配置"
-
-    echo -e "  ${DIM}核心脚本: 环境快照时计算这些文件的哈希${RESET}"
-    echo -n "  输入核心脚本(逗号分隔) 或 'scan' 自动扫描 [scan]: "
-    read -r choice
-    choice="${choice:-scan}"
-
-    if [[ "$choice" == "scan" ]]; then
-        local py_files
-        py_files=$(find "$PROJECT" -maxdepth 1 -name "*.py" ! -name "_*" ! -name ".*" -exec basename {} \; 2>/dev/null | sort)
-        if [[ -n "$py_files" ]]; then
-            echo "    扫描到的 .py 文件:"
-            local i=1
-            while IFS= read -r f; do
-                echo "      $i. $f"
-                ((i++))
-            done <<< "$py_files"
-            echo -n "  选择编号(逗号分隔) 或 'all' 或回车跳过: "
-            read -r selected
-            if [[ "$selected" == "all" ]]; then
-                CFG_SCRIPTS=$(echo "$py_files" | tr '\n' ',' | sed 's/,$//')
-            elif [[ -n "$selected" ]]; then
-                CFG_SCRIPTS=""
-                IFS=',' read -ra indices <<< "$selected"
-                for idx in "${indices[@]}"; do
-                    idx=$(echo "$idx" | tr -d ' ')
-                    local line
-                    line=$(echo "$py_files" | sed -n "${idx}p")
-                    [[ -n "$line" ]] && CFG_SCRIPTS="$CFG_SCRIPTS$line,"
-                done
-                CFG_SCRIPTS="${CFG_SCRIPTS%,}"
-            fi
-        fi
-    else
-        CFG_SCRIPTS="$choice"
-    fi
-
-    echo ""
-    echo -e "  ${DIM}核心资产: 模型文件(.pkl)、配置文件(.yaml)等${RESET}"
-    echo -n "  输入资产文件名(逗号分隔) 或 'none' [none]: "
-    read -r assets_input
-    assets_input="${assets_input:-none}"
-    [[ "$assets_input" != "none" ]] && CFG_ASSETS="$assets_input"
-
-    echo ""
-    echo -e "  ${DIM}Prompt 模板 glob 模式${RESET}"
-    echo -n "  glob (如 'prompts/*.txt') 或 'none' [none]: "
-    read -r prompt_glob
-    prompt_glob="${prompt_glob:-none}"
-    [[ "$prompt_glob" != "none" ]] && CFG_PROMPT_GLOB="$prompt_glob"
-}
-
-step2_auto() {
     CFG_SCRIPTS=$(find "$PROJECT" -maxdepth 1 -name "*.py" ! -name "_*" ! -name ".*" -exec basename {} \; 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
     CFG_ASSETS=$(find "$PROJECT" -maxdepth 1 \( -name "*.pkl" -o -name "*.yaml" \) -exec basename {} \; 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
     for pattern in "prompts/*.txt" "docs/prompt_*.md" "docs/long_text_*.txt"; do
@@ -199,84 +228,124 @@ step2_auto() {
             break
         fi
     done
-}
 
-# ==========================================
-# Step 3: 安装核心文件（全部到 .claude/ 下）
-# ==========================================
-step3_install_core() {
-    header "Step 3: 安装核心文件"
+    local n_scripts=0 n_assets=0
+    [[ -n "$CFG_SCRIPTS" ]] && n_scripts=$(echo "$CFG_SCRIPTS" | tr ',' '\n' | wc -l | tr -d ' ')
+    [[ -n "$CFG_ASSETS" ]] && n_assets=$(echo "$CFG_ASSETS" | tr ',' '\n' | wc -l | tr -d ' ')
+    echo "    扫描到: $n_scripts 个脚本, $n_assets 个资产, prompt_glob=${CFG_PROMPT_GLOB:-N/A}"
 
-    # .claude/audit-harness/ 目录
-    mkdir -p "$INSTALL_DIR"
+    # --- 创建 audit_config.py ---
+    header "创建项目配置"
 
-    # audit_context.py
-    local src="$LIB_SRC/audit_context.py"
-    local dst="$INSTALL_DIR/audit_context.py"
-    if $HAS_CORE && ! $AUTO; then
-        echo -n "  audit_context.py 已存在，覆盖? (y/N): "
-        read -r yn
-        if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-            cp "$src" "$dst"
-            ok "audit_context.py (已更新)"
-        else
-            echo "    ⏭️  跳过"
-        fi
-    else
-        cp "$src" "$dst"
-        ok "audit_context.py → .claude/audit-harness/"
-    fi
+    mkdir -p "$proj_claude"
 
-    # audit_config.py
-    local dst_cfg="$INSTALL_DIR/audit_config.py"
-    if $HAS_CONFIG && ! $AUTO; then
-        echo -n "  audit_config.py 已存在，覆盖? (y/N): "
-        read -r yn
-        if [[ "$yn" == "y" || "$yn" == "Y" ]]; then
-            _gen_config "$dst_cfg"
-            ok "audit_config.py (已更新)"
-        else
-            echo "    ⏭️  跳过"
-        fi
+    local dst_cfg="$proj_claude/audit_config.py"
+    if $has_config; then
+        ok "audit_config.py 已存在（保留）"
     else
         _gen_config "$dst_cfg"
-        ok "audit_config.py → .claude/audit-harness/"
+        ok "audit_config.py → .claude/"
     fi
 
-    # __init__.py（让 .claude/audit-harness/ 可作为 Python 包导入）
-    cat > "$INSTALL_DIR/__init__.py" << 'EOF'
-"""audit-harness: 审计执行保障框架"""
-import sys
-from pathlib import Path
-# 确保项目根目录在 sys.path 中（供 audit_config.py 引用项目文件）
-_project_root = Path(__file__).parent.parent.parent
-if str(_project_root) not in sys.path:
-    sys.path.insert(0, str(_project_root))
-EOF
-    ok "__init__.py → .claude/audit-harness/"
-
-    # .claude/runs/
-    mkdir -p "$RUNS_DIR/daily"
+    # --- 创建 runs/ ---
+    mkdir -p "$proj_runs/daily"
     ok ".claude/runs/ 目录已创建"
 
-    # .claude/runs/.gitignore
-    if [[ ! -f "$RUNS_DIR/.gitignore" ]]; then
-        cat > "$RUNS_DIR/.gitignore" << 'GITIGNORE'
-# 审计数据：大文件不入库，保留日报
+    if [[ ! -f "$proj_runs/.gitignore" ]]; then
+        cat > "$proj_runs/.gitignore" << 'GITIGNORE'
 *.jsonl
 *.json
 !index.json
 !daily/
 !weekly/
 GITIGNORE
-        ok ".claude/runs/.gitignore 已创建"
+        ok ".claude/runs/.gitignore"
     fi
+
+    # --- CLAUDE.md ---
+    header "配置 CLAUDE.md"
+
+    local audit_section
+    audit_section=$(cat "$GLOBAL_DIR/audit-harness/templates/CLAUDE.md.audit-section" 2>/dev/null || cat "$TEMPLATES_SRC/CLAUDE.md.audit-section")
+
+    if ! $has_claude; then
+        local proj_name
+        proj_name=$(basename "$PROJECT")
+        {
+            echo "# $proj_name"
+            echo ""
+            echo "> 项目描述（请填写）"
+            echo ""
+            echo "---"
+            echo ""
+            echo "$audit_section"
+        } > "$PROJECT/CLAUDE.md"
+        ok "创建 CLAUDE.md（含审计规范）"
+    elif ! $has_audit; then
+        {
+            echo ""
+            echo "---"
+            echo ""
+            echo "$audit_section"
+        } >> "$PROJECT/CLAUDE.md"
+        ok "审计规范已追加到 CLAUDE.md"
+    else
+        ok "CLAUDE.md 已包含审计规范"
+    fi
+
+    # --- 验证 ---
+    header "验证"
+
+    local passed=0 total=0
+
+    _verify() {
+        local label="$1"; shift
+        ((total++))
+        if "$@" 2>/dev/null; then
+            ok "$label"
+            ((passed++)) || true
+        else
+            fail "$label"
+        fi
+    }
+
+    _verify "全局: audit_context.py" test -f "$GLOBAL_DIR/audit-harness/audit_context.py"
+    _verify "全局: Skills"           test -d "$GLOBAL_DIR/skills/audit-start"
+    _verify "项目: audit_config.py"  test -f "$proj_claude/audit_config.py"
+    _verify "项目: .claude/runs/"    test -d "$proj_runs"
+    _verify "项目: CLAUDE.md"        grep -q "\[AUDIT\]" "$PROJECT/CLAUDE.md"
+
+    echo ""
+    echo "    验证结果: $passed/$total 通过"
+
+    # --- 总结 ---
+    echo ""
+    echo -e "${BOLD}============================================================${RESET}"
+    if [[ $passed -eq $total ]]; then
+        echo -e "${GREEN}${BOLD}  项目初始化完成！${RESET}"
+    else
+        echo -e "${YELLOW}${BOLD}  项目初始化完成（部分验证未通过）${RESET}"
+    fi
+    echo -e "${BOLD}============================================================${RESET}"
+    echo ""
+    echo "  全局（所有项目共享）:"
+    echo "    ~/.claude/audit-harness/  — 核心代码"
+    echo "    ~/.claude/skills/         — /start /end /recover /report-daily"
+    echo ""
+    echo "  本项目:"
+    echo "    .claude/audit_config.py   — 项目配置（$n_scripts 个脚本, $n_assets 个资产）"
+    echo "    .claude/runs/             — 审计数据存储"
+    echo "    CLAUDE.md                 — 审计规范（已注入）"
+    echo ""
+    echo "  开始使用:"
+    echo '    /start "你的第一个任务"'
+    echo ""
+    echo -e "${BOLD}============================================================${RESET}"
 }
 
 _gen_config() {
     local dst="$1"
     local scripts_py="" assets_py=""
-
     if [[ -n "$CFG_SCRIPTS" ]]; then
         IFS=',' read -ra arr <<< "$CFG_SCRIPTS"
         for s in "${arr[@]}"; do
@@ -285,7 +354,6 @@ _gen_config() {
 "
         done
     fi
-
     if [[ -n "$CFG_ASSETS" ]]; then
         IFS=',' read -ra arr <<< "$CFG_ASSETS"
         for a in "${arr[@]}"; do
@@ -294,11 +362,10 @@ _gen_config() {
 "
         done
     fi
-
     cat > "$dst" << PYEOF
 """
 audit_config.py — 项目专属审计配置
-自动生成 by audit-harness install.sh
+自动生成 by audit-harness install.sh --init
 """
 
 CORE_SCRIPTS = [
@@ -329,198 +396,19 @@ ALERT_RULES = [
 PYEOF
 }
 
-# ==========================================
-# Step 4: 安装 Skills（到 .claude/skills/）
-# ==========================================
-step4_install_skills() {
-    header "Step 4: 安装 Skills"
-
-    mkdir -p "$SKILLS_DST"
-
-    local installed=0
-    for skill_dir in "$SKILLS_SRC"/*/; do
-        local name
-        name=$(basename "$skill_dir")
-        [[ "$name" == "audit-init" ]] && continue
-        [[ ! -f "$skill_dir/SKILL.md" ]] && continue
-
-        local dst="$SKILLS_DST/$name"
-        rm -rf "$dst"
-        cp -r "$skill_dir" "$dst"
-
-        local short_name="${name#audit-}"
-        ok "/$short_name → .claude/skills/$name"
-        ((installed++))
-    done
-
-    echo ""
-    echo "    已安装 $installed 个 Skills"
-}
-
-# ==========================================
-# Step 5: 注入 CLAUDE.md
-# ==========================================
-step5_inject_claude_md() {
-    header "Step 5: 配置 CLAUDE.md"
-
-    local audit_section
-    audit_section=$(cat "$TEMPLATES_SRC/CLAUDE.md.audit-section")
-
-    if ! $HAS_CLAUDE_MD; then
-        local proj_name
-        proj_name=$(basename "$PROJECT")
-        {
-            echo "# $proj_name"
-            echo ""
-            echo "> 项目描述（请填写）"
-            echo ""
-            echo "---"
-            echo ""
-            echo "$audit_section"
-        } > "$PROJECT/CLAUDE.md"
-        ok "创建 CLAUDE.md（含审计规范）"
-
-    elif ! $HAS_AUDIT_SECTION; then
-        local should_append=false
-        if $AUTO; then
-            should_append=true
-        else
-            echo -n "  将在 CLAUDE.md 末尾追加审计规范，确认? (Y/n): "
-            read -r yn
-            [[ "$yn" != "n" && "$yn" != "N" ]] && should_append=true
-        fi
-
-        if $should_append; then
-            {
-                echo ""
-                echo "---"
-                echo ""
-                echo "$audit_section"
-            } >> "$PROJECT/CLAUDE.md"
-            ok "审计规范已追加到 CLAUDE.md"
-        else
-            echo "    ⏭️  跳过"
-        fi
-    else
-        ok "CLAUDE.md 已包含审计规范（跳过）"
-    fi
-}
-
-# ==========================================
-# Step 6: 验证安装
-# ==========================================
-step6_verify() {
-    header "Step 6: 验证安装"
-
-    local passed=0
-    local total=0
-
-    ((total++))
-    if [[ -f "$INSTALL_DIR/audit_context.py" ]]; then
-        ok ".claude/audit-harness/audit_context.py"
-        ((passed++))
-    else
-        fail "audit_context.py 不存在"
-    fi
-
-    ((total++))
-    if [[ -f "$INSTALL_DIR/audit_config.py" ]]; then
-        ok ".claude/audit-harness/audit_config.py"
-        ((passed++))
-    else
-        fail "audit_config.py 不存在"
-    fi
-
-    ((total++))
-    if [[ -d "$RUNS_DIR" ]] && touch "$RUNS_DIR/.verify_test" 2>/dev/null; then
-        rm -f "$RUNS_DIR/.verify_test"
-        ok ".claude/runs/ 可写"
-        ((passed++))
-    else
-        fail ".claude/runs/ 不可写"
-    fi
-
-    ((total++))
-    local skill_count=0
-    for d in "$SKILLS_DST"/audit-*/; do
-        [[ -f "$d/SKILL.md" ]] && ((skill_count++))
-    done
-    if [[ $skill_count -ge 4 ]]; then
-        ok "Skills ($skill_count 个)"
-        ((passed++))
-    else
-        fail "Skills 不完整 ($skill_count/4)"
-    fi
-
-    ((total++))
-    if grep -q "\[AUDIT\]" "$PROJECT/CLAUDE.md" 2>/dev/null; then
-        ok "CLAUDE.md [AUDIT] 格式规范"
-        ((passed++))
-    else
-        fail "CLAUDE.md 缺少 [AUDIT]"
-    fi
-
-    echo ""
-    echo "    验证结果: $passed/$total 通过"
-    [[ $passed -eq $total ]]
-}
-
-# ==========================================
-# Step 7: 安装总结
-# ==========================================
-step7_summary() {
-    local all_passed=$1
-
-    echo ""
-    echo -e "${BOLD}============================================================${RESET}"
-    if $all_passed; then
-        echo -e "${GREEN}${BOLD}  audit-harness 安装完成！${RESET}"
-    else
-        echo -e "${YELLOW}${BOLD}  audit-harness 安装完成（部分验证未通过）${RESET}"
-    fi
-    echo -e "${BOLD}============================================================${RESET}"
-    echo ""
-    echo "  安装位置:"
-    echo "    .claude/audit-harness/  — 核心代码 + 配置"
-    echo "    .claude/skills/         — 4 个 Skills"
-    echo "    .claude/runs/           — 审计数据存储"
-    echo "    CLAUDE.md               — 审计规范（已注入）"
-    echo ""
-    echo "  可用 Skills:"
-    echo '    /start "任务描述"      — 创建审计会话 + 恢复历史上下文'
-    echo "    /end                   — 结束会话 + 审计完整性检查"
-    echo "    /recover               — 恢复丢失的 Context"
-    echo "    /report-daily          — 生成审计驱动的工作日报"
-    echo ""
-    echo "  开始使用:"
-    echo '    /start "你的第一个任务"'
-    echo ""
-    echo -e "${BOLD}============================================================${RESET}"
-}
-
-# ==========================================
+# ============================================================
 # Main
-# ==========================================
-step1_detect
-
-if ! $AUTO; then
-    echo ""
-    echo -n "  开始安装? (Y/n): "
-    read -r yn
-    if [[ "$yn" == "n" || "$yn" == "N" ]]; then
-        echo "  已取消。"
-        exit 0
-    fi
-    step2_collect
-else
-    step2_auto
-fi
-
-step3_install_core
-step4_install_skills
-step5_inject_claude_md
-
-all_passed=true
-step6_verify || all_passed=false
-
-step7_summary "$all_passed"
+# ============================================================
+case "$MODE" in
+    global)
+        install_global
+        ;;
+    init)
+        init_project
+        ;;
+    auto)
+        install_global
+        echo ""
+        init_project
+        ;;
+esac
