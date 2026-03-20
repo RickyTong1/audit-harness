@@ -125,6 +125,8 @@ def hash_dir(dir_path: str | Path, pattern: str = "*.jsonl") -> str | None:
 
 def _find_prompt_template() -> str | None:
     """查找当前 prompt 模板文件路径。"""
+    if not PROMPT_TEMPLATE_GLOB:
+        return None
     matches = list(PROJECT_ROOT.glob(PROMPT_TEMPLATE_GLOB))
     return str(matches[0].relative_to(PROJECT_ROOT)) if matches else None
 
