@@ -39,6 +39,12 @@ header() { echo -e "\n${BOLD}--- $* ---${RESET}\n"; }
 # ==========================================
 # 参数解析
 # ==========================================
+# 智能模式选择：
+#   无参数        → 自动判断（全局未装→全局+当前项目 / 全局已装→仅当前项目）
+#   --global      → 仅全局安装
+#   --init [path] → 仅项目初始化（默认当前目录）
+#   --auto [path] → 全局 + 项目初始化
+# ==========================================
 MODE=""
 PROJECT=""
 
@@ -49,26 +55,37 @@ while [[ $# -gt 0 ]]; do
         --auto)   MODE="auto";   shift ;;
         --help|-h)
             echo "用法:"
-            echo "  bash install.sh --global              全局安装（Skills + 核心代码 → ~/.claude/）"
-            echo "  bash install.sh --init [project_dir]  项目初始化（runs/ + 配置 + CLAUDE.md）"
-            echo "  bash install.sh --auto [project_dir]  全局 + 项目初始化，一步到位"
+            echo "  bash install.sh                         智能模式（自动判断）"
+            echo "  bash install.sh --global                仅全局安装"
+            echo "  bash install.sh --init [project_dir]    仅项目初始化（默认当前目录）"
+            echo "  bash install.sh --auto [project_dir]    全局 + 项目初始化"
+            echo ""
+            echo "无参数时自动判断："
+            echo "  全局未安装 → 全局安装 + 当前目录项目初始化"
+            echo "  全局已安装 → 仅当前目录项目初始化"
             exit 0
             ;;
         *) PROJECT="$1"; shift ;;
     esac
 done
 
+# 智能模式：无参数时自动判断
 if [[ -z "$MODE" ]]; then
-    echo -e "${RED}错误: 请指定模式 --global, --init, 或 --auto${RESET}"
-    echo "  bash install.sh --help 查看用法"
-    exit 1
+    if [[ -f "$GLOBAL_DIR/audit-harness/audit_context.py" ]]; then
+        MODE="init"
+    else
+        MODE="auto"
+    fi
 fi
 
+# 项目路径：默认当前工作目录
 if [[ "$MODE" == "init" || "$MODE" == "auto" ]]; then
     PROJECT="${PROJECT:-$(pwd)}"
     PROJECT="$(cd "$PROJECT" && pwd)"
     if [[ "$PROJECT" == "$HARNESS_ROOT" ]]; then
         echo -e "${RED}错误: 不能安装到 audit-harness 包自身。${RESET}"
+        echo "  请在项目目录中运行，或指定目标路径:"
+        echo "    cd /your/project && bash $HARNESS_ROOT/install.sh"
         exit 1
     fi
 fi
