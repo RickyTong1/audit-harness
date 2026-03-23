@@ -164,6 +164,28 @@ PYEOF
     echo ""
     echo "    已安装 $installed 个 Skills（全局可用）"
 
+    # --- 安装 Hooks ---
+    header "安装 Hooks → ~/.claude/audit-harness/hooks/"
+
+    local hooks_dst="$install_dir/hooks"
+    mkdir -p "$hooks_dst"
+
+    cp "$HARNESS_ROOT/hooks/post_tool_audit.sh" "$hooks_dst/"
+    cp "$HARNESS_ROOT/hooks/stop_flush.sh" "$hooks_dst/"
+    cp "$HARNESS_ROOT/hooks/prompt_inject_session.sh" "$hooks_dst/"
+    chmod +x "$hooks_dst"/*.sh
+    ok "3 个 Hooks 已安装"
+
+    # --- 配置 settings.json hooks ---
+    header "配置 Hooks → ~/.claude/settings.json"
+
+    local settings="$GLOBAL_DIR/settings.json"
+    local hooks_path="$hooks_dst"
+
+    # 生成 hooks 配置 JSON
+    _install_hooks_config "$settings" "$hooks_path"
+    ok "settings.json hooks 已配置"
+
     # --- 总结 ---
     echo ""
     echo -e "${BOLD}============================================================${RESET}"
@@ -171,13 +193,128 @@ PYEOF
     echo -e "${BOLD}============================================================${RESET}"
     echo ""
     echo "  已安装:"
-    echo "    ~/.claude/audit-harness/  — 核心代码 + 模板"
-    echo "    ~/.claude/skills/         — 4 个 Skills（所有项目可用）"
+    echo "    ~/.claude/audit-harness/        — 核心代码 + 模板"
+    echo "    ~/.claude/audit-harness/hooks/  — 3 个自动审计 Hooks"
+    echo "    ~/.claude/skills/               — 4 个 Skills（所有项目可用）"
+    echo "    ~/.claude/settings.json         — Hooks 配置"
+    echo ""
+    echo "  Hooks 说明:"
+    echo "    PostToolUse → 自动记录 Write/Edit/Bash 操作到 audit_buffer"
+    echo "    Stop        → 每轮回复后刷写 buffer 到 session 审计文件"
+    echo "    UserPrompt  → 每轮输入时注入 session 上下文提醒"
     echo ""
     echo "  下一步: 在项目中执行初始化:"
     echo "    bash install.sh --init /path/to/your/project"
     echo ""
     echo -e "${BOLD}============================================================${RESET}"
+}
+
+# 配置 settings.json 中的 hooks
+_install_hooks_config() {
+    local settings="$1"
+    local hooks_path="$2"
+
+    # 如果有 python3，用 python 做精准 JSON 合并
+    if command -v python3 &>/dev/null; then
+        python3 << PYEOF
+import json, os
+
+settings_path = "$settings"
+hooks_path = "$hooks_path"
+
+# 加载现有 settings
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        settings = json.load(f)
+else:
+    settings = {}
+
+# 构建 hooks 配置
+audit_hooks = {
+    "PostToolUse": [
+        {
+            "matcher": "Write|Edit|Bash|NotebookEdit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {hooks_path}/post_tool_audit.sh"
+                }
+            ]
+        }
+    ],
+    "Stop": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {hooks_path}/stop_flush.sh"
+                }
+            ]
+        }
+    ],
+    "UserPromptSubmit": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {hooks_path}/prompt_inject_session.sh"
+                }
+            ]
+        }
+    ]
+}
+
+# 合并：保留用户已有的 hooks，追加 audit hooks
+existing_hooks = settings.get("hooks", {})
+for event, hook_list in audit_hooks.items():
+    if event not in existing_hooks:
+        existing_hooks[event] = hook_list
+    else:
+        # 检查是否已有 audit hook（避免重复安装）
+        existing_cmds = [h.get("hooks", [{}])[0].get("command", "") for h in existing_hooks[event]]
+        for new_hook in hook_list:
+            new_cmd = new_hook.get("hooks", [{}])[0].get("command", "")
+            if not any("audit" in c for c in existing_cmds):
+                existing_hooks[event].append(new_hook)
+
+settings["hooks"] = existing_hooks
+
+with open(settings_path, "w") as f:
+    json.dump(settings, f, indent=2, ensure_ascii=False)
+PYEOF
+    else
+        # 无 python 时的 fallback：如果 settings.json 不存在，直接写入
+        if [[ ! -f "$settings" ]]; then
+            cat > "$settings" << JSONEOF
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|Bash|NotebookEdit",
+        "hooks": [{"type": "command", "command": "bash ${hooks_path}/post_tool_audit.sh"}]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "bash ${hooks_path}/stop_flush.sh"}]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "bash ${hooks_path}/prompt_inject_session.sh"}]
+      }
+    ]
+  }
+}
+JSONEOF
+        else
+            warn "settings.json 已存在且无 python3，请手动配置 hooks"
+        fi
+    fi
 }
 
 # ============================================================

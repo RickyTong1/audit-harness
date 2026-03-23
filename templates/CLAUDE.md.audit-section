@@ -38,6 +38,25 @@ hash_out: {输出标识，如有}
 
 **没有 [AUDIT] 块的数据操作 = 未完成。** 这不是建议，是格式约束。
 
+### [AUDIT] 块持久化（强制）
+
+仅在回复中输出 [AUDIT] 块**不够**——context 压缩后会丢失。
+**每次输出 [AUDIT] 块时，必须同时用 Bash 追加到持久化文件：**
+
+```bash
+echo '{"batch":"SESSION_ID","action":"你做了什么","input":"输入","output":"输出","timestamp":"ISO8601"}' >> .claude/runs/audit_pending.jsonl
+```
+
+> Stop hook 会在每轮回复结束后自动将 `audit_pending.jsonl` 归档到当前 session 的审计文件中。
+> 你只需要写入 pending 文件，归档由 hook 自动完成。
+
+### 审计自动化说明
+
+以下 hooks 已自动配置，你不需要手动操作：
+- **PostToolUse hook**：每次 Write/Edit/Bash 操作后自动记录到 `audit_buffer.jsonl`
+- **Stop hook**：每轮回复结束后自动将 buffer + pending 归档到 session 审计文件 + 更新 index.json
+- **UserPromptSubmit hook**：每轮输入时自动注入当前 session_id，提醒你持久化 [AUDIT] 块
+
 ### Context 恢复规则
 
 **新会话启动时**，如果 `runs/` 目录存在：
