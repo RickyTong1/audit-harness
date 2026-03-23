@@ -31,7 +31,9 @@ if [[ -n "$SESSION_ID" ]]; then
     [[ -f "$TRAIL" ]] && RECORDS=$(wc -l < "$TRAIL" | tr -d ' ')
     OUTPUT="[audit-harness] session=${SESSION_ID} | records=${RECORDS}"
     OUTPUT="${OUTPUT} | 当你输出 [AUDIT] 块时，同时用 Bash 追加到 .claude/runs/audit_pending.jsonl:"
-    OUTPUT="${OUTPUT} echo '{\"batch\":\"${SESSION_ID}\",\"action\":\"...\",\"input\":\"...\",\"output\":\"...\"}' >> .claude/runs/audit_pending.jsonl"
+    OUTPUT="${OUTPUT} echo '{\"batch\":\"${SESSION_ID}\",\"action\":\"...\",\"input\":\"...\",\"output\":\"...\",\"timestamp\":\"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\"}' >> .claude/runs/audit_pending.jsonl"
+else
+    OUTPUT="[audit-harness] 无活跃审计会话。如果你即将开始数据处理、代码修改或分析任务，建议先执行 /start \"任务描述\" 创建审计会话。"
 fi
 
 # 如果有未解决的 CRITICAL 告警

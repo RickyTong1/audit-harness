@@ -1,1 +1,11 @@
-{"entries":[{"id":"auto_20260323_1309","type":"auto","last_updated":"2026-03-23T05:09:03Z","status":"in_progress","total_records":1}]}
+{
+  "entries": [
+    {
+      "id": "auto_20260323_1309",
+      "type": "auto",
+      "last_updated": "2026-03-23T05:58:13Z",
+      "status": "in_progress",
+      "total_records": 4
+    }
+  ]
+}

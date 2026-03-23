@@ -1,6 +1,6 @@
 ---
 name: audit-report-daily
-description: 基于 runs/ 目录的审计数据自动生成工作日报。日报每个数字都可追溯到审计记录。也可通过 cron 每日 08:03 自动触发。
+description: 基于 .claude/runs/ 目录的审计数据自动生成工作日报。日报每个数字都可追溯到审计记录。当用户说"生成日报"、"今天做了什么"、"写报告"、"总结一下今天的工作"，或通过 cron 每日 08:03 自动触发时使用。
 user-invocable: true
 allowed-tools:
   - Read
@@ -22,67 +22,125 @@ allowed-tools:
 
 ## 数据源
 
-日报的**每个数字**都有明确的数据源，不允许"凭记忆"填写：
+日报的**每个数字**都有明确的数据源，不允许"凭记忆"填写。
+
+所有数据来自 `.claude/runs/` 目录：
 
 | 日报板块 | 数据源 |
 |---------|--------|
-| 任务总览 | `runs/index.json` |
-| 数据处理指标 | `runs/batch_*/manifest.json` |
-| 变更记录 | `runs/*/audit_trail.jsonl` (step="change") |
-| 异常与告警 | `runs/*/anomalies.json` |
-| 用户反馈与修正 | `runs/adhoc_*/audit_blocks.jsonl` (action_type="user_correction") |
-| 昨日待办跟进 | 前一天日报的 §七 |
-| 明日待办 | 当日异常 + 未完成任务 |
-| 审计完整性检查 | 全量扫描 runs/ |
-
-## 日报模板
-
-读取 `references/report_template.md` 获取完整模板。
+| 任务总览 | `.claude/runs/index.json` |
+| 工具操作统计 | `.claude/runs/*/audit_trail.jsonl` 中的 tool 记录 |
+| 变更记录 | `.claude/runs/*/audit_trail.jsonl` 中含 "change"/"prompt"/"edit" 的条目 |
+| [AUDIT] 块汇总 | `.claude/runs/audit_pending.jsonl` + 各 session 的 audit_trail |
+| 异常与告警 | `.claude/runs/*/anomalies.json`（如果存在） |
+| 用户反馈与修正 | audit_trail 中含 "user_correction" 的条目 |
+| 昨日待办跟进 | 前一天日报（`.claude/runs/daily/` 下） |
 
 ## 执行步骤
 
 ### 1. 收集数据
 
-```
-target_date = 参数日期 或 今天
+```bash
+target_date="${1:-$(date +%Y%m%d)}"
 
-1. 从 runs/index.json 筛选 target_date 的所有 batch + adhoc 条目
-2. 逐个读取 manifest.json / session.json / audit_blocks.jsonl / anomalies.json
-3. 从最近 7 天的 manifest 中提取历史数据（用于趋势对比）
-4. 从前一天的日报中提取 §七 待办（用于跟进）
+# 1. 读取 index.json，筛选 target_date 相关的 session
+# 2. 逐个读取各 session 的 audit_trail.jsonl
+# 3. 读取 audit_pending.jsonl（可能有未归档的最新数据）
+# 4. 如果有前一天的日报，提取 §七 待办（用于跟进）
 ```
 
 ### 2. 生成日报
 
-按模板填充所有板块，每个数字旁标注 `来源字段`。
+按以下结构填充，每个数字旁标注数据来源：
+
+```markdown
+# 工作日报 | {DATE}
+
+> 自动生成时间: {NOW}
+> 数据来源: .claude/runs/index.json + 各 session audit_trail
+> 覆盖时间段: {DATE} 00:00 — {DATE} 23:59
+
+---
+
+## 一、任务总览
+
+| # | 类型 | session_id | 任务描述 | 状态 | 审计记录数 |
+|---|------|-----------|---------|------|-----------|
+
+> 来源: .claude/runs/index.json
+
+---
+
+## 二、操作统计
+
+| 指标 | 数量 | 来源 |
+|------|------|------|
+| Write/Edit 操作 | {N} | audit_trail tool=Write/Edit |
+| Bash 执行 | {N} | audit_trail tool=Bash |
+| [AUDIT] 块 | {N} | audit_pending + audit_trail |
+
+---
+
+## 三、变更记录
+
+| # | 时间 | 变更对象 | 变更内容 | 来源 |
+|---|------|---------|---------|------|
+
+> 从 audit_trail 和 audit_pending 中提取涉及文件修改的条目
+
+---
+
+## 四、用户反馈与修正
+
+| # | 反馈内容 | 修正后 | 已固化到 |
+|---|---------|-------|---------|
+
+> 从 audit_trail 中提取 user_correction 类型条目
+
+---
+
+## 五、昨日待办跟进
+
+| # | 昨日待办 | 今日状态 | 说明 |
+|---|---------|---------|------|
+
+---
+
+## 六、明日待办
+
+- [ ] ...
+
+---
+
+## 七、审计完整性
+
+| 检查项 | 结果 |
+|--------|------|
+| 所有 session 有审计记录 | {结果} |
+| [AUDIT] 块已持久化 | {结果} |
+| 用户修正已固化 | {结果} |
+```
 
 ### 3. 保存
 
-```
-runs/daily/{YYYYMMDD}_daily.md
+```bash
+mkdir -p .claude/runs/daily
+# 写入 .claude/runs/daily/{YYYYMMDD}_daily.md
 ```
 
 ### 4. 如果是 /report-daily review：晨间自我修正
 
-在日报生成后，额外执行：
+在日报生成后，额外执行自我审视：
 
-1. 审视昨日异常是否都有处理方案
-2. 审视用户反馈是否已转化为系统改进
-3. 审视关键指标是否有持续恶化趋势
-4. 生成修正报告：`runs/daily/{YYYYMMDD}_morning_review.md`
+1. 昨日异常是否都有处理方案？
+2. 用户反馈是否已转化为系统改进？
+3. 昨日待办是否都完成了？
+4. 生成修正报告：`.claude/runs/daily/{YYYYMMDD}_morning_review.md`
 5. 输出今日推荐优先级
-
-## cron 自动化
-
-建议在每日首次启动 Claude Code 时设置 cron：
-
-```
-cron "3 8 * * *"   → /report-daily {yesterday}
-cron "5 8 * * *"   → /report-daily review
-```
 
 ## 注意事项
 
-- 如果某天没有任何 batch 或 adhoc 记录，生成空日报并标注"当日无活动"
-- 日报本身也是一条审计记录——保存后自动更新 index.json
-- 历史日报不可修改（append-only），如果发现错误，发布更正日报
+- 如果某天没有任何 session 记录，生成空日报并标注"当日无活动"
+- 日报本身也应写一条 [AUDIT] 块
+- 历史日报不可修改（append-only），如有错误则发布更正日报
+- 日报中所有数字**必须**来自 `.claude/runs/` 下的文件，禁止凭记忆填写
