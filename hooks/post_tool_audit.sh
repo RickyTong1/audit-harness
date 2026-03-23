@@ -2,12 +2,10 @@
 # ============================================================
 # PostToolUse Hook: 自动捕获工具调用审计
 # ============================================================
-# 安全保证：
-#   - 不使用 set -e
-#   - 不使用 watchdog（会干扰 stdin 读取）
-#   - 不使用 timeout（macOS 可能不支持或行为不一致）
-#   - 所有命令附带 2>/dev/null
-#   - 最坏情况：静默退出
+# 关键设计：
+#   1. 先用 dd 把 stdin 存到临时文件（避免 shell 变量损坏中文/引号）
+#   2. 用 python3 从临时文件读取并安全解析 JSON
+#   3. 不使用 set -e / watchdog / timeout
 # ============================================================
 
 RUNS_DIR="${PWD}/.claude/runs"
@@ -15,36 +13,64 @@ BUFFER="${RUNS_DIR}/audit_buffer.jsonl"
 
 mkdir -p "$RUNS_DIR" 2>/dev/null || exit 0
 
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "unknown")
-
-# 读 stdin：Claude Code 通过 stdin 传入 JSON
-# 不用 timeout，不用 watchdog，直接 read 限制字节数
-STDIN_DATA=""
+# 把 stdin 存到临时文件（避免 shell 变量中转损坏数据）
+TMPFILE=$(mktemp /tmp/audit_hook_XXXXXX 2>/dev/null) || exit 0
 if ! [ -t 0 ]; then
-    STDIN_DATA=$(dd bs=1 count=4000 2>/dev/null || true)
+    dd bs=1 count=8000 of="$TMPFILE" 2>/dev/null
 fi
 
-# 从 stdin JSON 中提取 tool_name
-TOOL=""
-if [[ -n "$STDIN_DATA" ]]; then
-    TOOL=$(echo "$STDIN_DATA" | grep -o '"tool_name":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4 2>/dev/null || true)
+# 检查临时文件是否有内容
+[[ -s "$TMPFILE" ]] || { rm -f "$TMPFILE"; exit 0; }
+
+if command -v python3 &>/dev/null; then
+    python3 - "$TMPFILE" "$BUFFER" << 'PYEOF' 2>/dev/null
+import sys, json, datetime
+
+stdin_file = sys.argv[1]
+buffer_file = sys.argv[2]
+
+try:
+    with open(stdin_file, "r", encoding="utf-8", errors="replace") as f:
+        data = json.loads(f.read())
+except:
+    sys.exit(0)
+
+ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+tool = data.get("tool_name", "tool_use")
+sid = data.get("session_id", "")
+tool_input = data.get("tool_input", {})
+
+summary = ""
+if tool == "Bash":
+    cmd = tool_input.get("command", "")
+    for line in cmd.split("\n"):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            summary = line[:200]
+            break
+    if not summary:
+        summary = cmd[:200]
+elif tool in ("Write", "Edit"):
+    summary = tool_input.get("file_path", "")
+elif tool == "NotebookEdit":
+    summary = tool_input.get("notebook_path", "")
+
+record = {
+    "timestamp": ts,
+    "tool": tool,
+    "session": sid,
+    "summary": summary,
+}
+
+with open(buffer_file, "a", encoding="utf-8") as f:
+    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+PYEOF
+else
+    # 无 python3 fallback
+    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "unknown")
+    TOOL=$(grep -o '"tool_name":"[^"]*"' "$TMPFILE" 2>/dev/null | head -1 | cut -d'"' -f4 || echo "tool_use")
+    echo "{\"timestamp\":\"${TIMESTAMP}\",\"tool\":\"${TOOL}\",\"summary\":\"(no python3)\"}" >> "$BUFFER" 2>/dev/null
 fi
-TOOL="${TOOL:-tool_use}"
 
-# 提取 session_id（用于关联）
-SID=$(echo "$STDIN_DATA" | grep -o '"session_id":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4 2>/dev/null || true)
-
-# 提取 command 或 file_path 的前 200 字符作为摘要
-SUMMARY=""
-if [[ "$TOOL" == "Bash" ]]; then
-    SUMMARY=$(echo "$STDIN_DATA" | grep -o '"command":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4 2>/dev/null | head -c 200 || true)
-elif [[ "$TOOL" == "Write" || "$TOOL" == "Edit" ]]; then
-    SUMMARY=$(echo "$STDIN_DATA" | grep -o '"file_path":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4 2>/dev/null || true)
-fi
-
-# 转义引号
-SUMMARY=$(echo "$SUMMARY" | tr '"' "'" 2>/dev/null || true)
-
-echo "{\"timestamp\":\"${TIMESTAMP}\",\"tool\":\"${TOOL}\",\"session\":\"${SID}\",\"summary\":\"${SUMMARY}\"}" >> "$BUFFER" 2>/dev/null
-
+rm -f "$TMPFILE"
 exit 0
