@@ -1,16 +1,16 @@
 """
-audit-harness | 审计执行保障基础模块（通用版）
-==============================================
-为 AI Agent 的 Skill 和 adhoc 操作提供统一的审计上下文，
-包括 Record-Level 追踪、BatchManifest 生成、hashchain 校验、
-异常检测、审计存储。
+L3 | 审计执行保障基础模块
+用途：为所有 Skill 和 adhoc 操作提供统一的审计上下文（AuditContext），
+     包括 Record-Level 追踪、BatchManifest 生成、hashchain 校验、
+     异常检测、审计存储。
 
-本模块是 audit-harness Plugin 的核心引擎。
-项目专属配置（CORE_SCRIPTS、CORE_ASSETS、ALERT_RULES）通过外部传入或
-audit_config.py 定义。
+输入：任何 Skill 或 adhoc 操作的执行上下文
+输出：runs/{batch_id}/ 下的 manifest.json, audit_trail.jsonl, anomalies.json
 
-安装：将本文件复制到项目根目录，或 pip install audit-harness
-使用：见 README.md
+关联文件：
+  - docs/L1_platform_blueprint.md §8    审计架构定义
+  - docs/L2_audit_enforcement_design.md 审计模块详细设计
+  - CLAUDE.md                           [AUDIT] 格式规范
 """
 from __future__ import annotations
 
@@ -30,32 +30,60 @@ AUDIT_SCHEMA_VERSION = "1.0"
 PROJECT_ROOT = Path(__file__).parent
 RUNS_DIR = PROJECT_ROOT / "runs"
 
-# ==========================================
-# 项目专属配置（可通过 audit_config.py 覆盖）
-# 如果项目根目录存在 audit_config.py，自动加载其中的配置。
-# 否则使用以下默认值（空列表 = 不做环境快照的脚本/资产哈希）。
-# ==========================================
+# 关键脚本——环境快照时计算这些文件的哈希
+CORE_SCRIPTS = [
+    "download.py",
+    "download_diff.py",
+    "clean_data_v3.py",
+    "chexing3_7.py",
+    "audit_filter_generic.py",
+    "xgb_preai_v3.py",
+    "end_to_end_accuracy.py",
+]
 
-CORE_SCRIPTS: list[str] = []
-CORE_ASSETS: list[str] = []
-PROMPT_TEMPLATE_GLOB: str = ""
+# 关键模型/配置文件
+CORE_ASSETS = [
+    "xgb_preai_v3.pkl",
+]
 
-# 尝试加载项目专属配置
-try:
-    from audit_config import (  # type: ignore
-        CORE_SCRIPTS as _cs,
-        CORE_ASSETS as _ca,
-        PROMPT_TEMPLATE_GLOB as _ptg,
-    )
-    CORE_SCRIPTS = _cs
-    CORE_ASSETS = _ca
-    PROMPT_TEMPLATE_GLOB = _ptg
-except ImportError:
-    pass  # 没有 audit_config.py，使用默认空值
+# prompt 模板 glob 模式
+PROMPT_TEMPLATE_GLOB = "docs/long_text_*.txt"
 
-# 告警规则（项目专属，通过 audit_config.py 定义）
-# 默认只包含一条通用规则：输出完整性校验
+# 告警规则 (来自 L1 §9.2，仅保留可自动检测的绝对阈值)
 ALERT_RULES: list[dict] = [
+    {
+        "id": "prompt2_empty_rate",
+        "condition": lambda m: m.get("input", {}).get("prompt2_empty_rate", 0) > 0.55,
+        "level": "CRITICAL",
+        "message": "prompt2 空率超过 55%，AI 筛选基本失效",
+    },
+    {
+        "id": "fields_count",
+        "condition": lambda m: (
+            m.get("input", {}).get("fields_count") is not None
+            and m.get("input", {}).get("fields_count") != 52
+        ),
+        "level": "CRITICAL",
+        "message": "上游 API 返回字段数 ≠ 52",
+    },
+    {
+        "id": "cleaning_delete_rate",
+        "condition": lambda m: _safe_div(
+            m.get("cleaning", {}).get("total_deleted", 0),
+            m.get("cleaning", {}).get("total_input", 1),
+        ) > 0.15,
+        "level": "WARNING",
+        "message": "清洗删除率超过 15%",
+    },
+    {
+        "id": "flag_rate",
+        "condition": lambda m: _safe_div(
+            m.get("screening", {}).get("flagged", 0),
+            m.get("screening", {}).get("total_screened", 1),
+        ) > 0.30,
+        "level": "WARNING",
+        "message": "人审量超过 30%",
+    },
     {
         "id": "output_integrity",
         "condition": lambda m: (
@@ -69,13 +97,6 @@ ALERT_RULES: list[dict] = [
         "message": "输出记录数 ≠ 输入 - 删除，存在数据丢失",
     },
 ]
-
-# 尝试加载项目专属告警规则
-try:
-    from audit_config import ALERT_RULES as _ar  # type: ignore
-    ALERT_RULES = _ar
-except ImportError:
-    pass
 
 
 # ==========================================
