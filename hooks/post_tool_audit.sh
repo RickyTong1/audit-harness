@@ -2,42 +2,43 @@
 # ============================================================
 # PostToolUse Hook: 自动捕获工具调用审计
 # ============================================================
-# 每次 Claude 调用 Write/Edit/Bash 后自动触发。
-# 将工具使用记录追加到 .claude/runs/audit_buffer.jsonl。
-# Stop hook 负责将 buffer 内容归档到正确的 session。
+# settings.json 的 matcher 已限定只有 Write|Edit|Bash|NotebookEdit 触发。
+# 因此 hook 内部不再做工具过滤——只要被触发就记录。
 #
-# 环境变量（由 Claude Code 注入）：
-#   CLAUDE_TOOL_NAME   — 工具名 (Write, Edit, Bash 等)
-#   CLAUDE_TOOL_INPUT  — 工具输入 JSON
-#   CLAUDE_FILE_PATHS  — 受影响的文件路径
+# 不依赖 CLAUDE_TOOL_NAME 等环境变量（已知可能为空）。
+# 仅依赖 $PWD（始终可用）和 stdin（Claude Code 传入的 JSON，可能为空）。
 # ============================================================
 
 RUNS_DIR="${PWD}/.claude/runs"
 BUFFER="${RUNS_DIR}/audit_buffer.jsonl"
 
-# 确保目录存在
-mkdir -p "$RUNS_DIR" 2>/dev/null || exit 0
+# 项目未初始化则跳过
+[[ -d "$RUNS_DIR" ]] || exit 0
 
-TOOL="${CLAUDE_TOOL_NAME:-unknown}"
+mkdir -p "$RUNS_DIR" 2>/dev/null
+
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# 尝试读取 stdin（Claude Code 可能传入 tool 信息的 JSON）
+STDIN_DATA=""
+if ! [ -t 0 ]; then
+    STDIN_DATA=$(head -c 2000)  # 限制读取量，防止阻塞
+fi
+
+# 尝试从环境变量获取工具名（可能为空）
+TOOL="${CLAUDE_TOOL_NAME:-}"
 FILES="${CLAUDE_FILE_PATHS:-}"
 
-# 只记录有实际副作用的工具
-case "$TOOL" in
-    Write|Edit|NotebookEdit)
-        ACTION="file_modify"
-        ;;
-    Bash)
-        ACTION="script_exec"
-        ;;
-    *)
-        # Read/Glob/Grep 等只读工具不记录
-        exit 0
-        ;;
-esac
+# 如果环境变量为空，尝试从 stdin 解析
+if [[ -z "$TOOL" && -n "$STDIN_DATA" ]]; then
+    # 简单提取 tool_name（不依赖 jq）
+    TOOL=$(echo "$STDIN_DATA" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+fi
 
-# 构建 JSON 行（纯 bash，不依赖 python/jq）
-# 转义双引号
-ESCAPED_FILES=$(echo "$FILES" | sed 's/"/\\"/g')
+# 如果还是拿不到工具名，用 "tool_use" 作为通用标记
+TOOL="${TOOL:-tool_use}"
 
-echo "{\"timestamp\":\"${TIMESTAMP}\",\"tool\":\"${TOOL}\",\"action\":\"${ACTION}\",\"files\":\"${ESCAPED_FILES}\"}" >> "$BUFFER"
+# 转义 stdin 中的引号用于 JSON
+ESCAPED_STDIN=$(echo "$STDIN_DATA" | tr '\n' ' ' | sed 's/"/\\"/g' | head -c 500)
+
+echo "{\"timestamp\":\"${TIMESTAMP}\",\"tool\":\"${TOOL}\",\"files\":\"${FILES}\",\"detail\":\"${ESCAPED_STDIN}\"}" >> "$BUFFER"
