@@ -2,16 +2,8 @@
 # ============================================================
 # Stop Hook: 每轮会话结束后刷写审计数据
 # ============================================================
-# 安全保证：
-#   - 不使用 set -e
-#   - 整个脚本 5 秒超时（watchdog）
-#   - python3 调用 2 秒超时
-#   - 任何失败静默退出，不影响 Claude Code 主流程
+# 安全保证：不使用 watchdog/timeout，所有命令 2>/dev/null
 # ============================================================
-
-# 整体超时保护：5 秒
-( sleep 5 && kill -9 $$ 2>/dev/null ) &
-WATCHDOG=$!
 
 RUNS_DIR="${PWD}/.claude/runs"
 BUFFER="${RUNS_DIR}/audit_buffer.jsonl"
@@ -19,7 +11,7 @@ PENDING="${RUNS_DIR}/audit_pending.jsonl"
 INDEX="${RUNS_DIR}/index.json"
 SESSION_FILE="${RUNS_DIR}/.current_session"
 
-mkdir -p "$RUNS_DIR" 2>/dev/null || { kill $WATCHDOG 2>/dev/null; exit 0; }
+mkdir -p "$RUNS_DIR" 2>/dev/null || exit 0
 
 # 检查是否有数据需要归档
 BUFFER_LINES=0
@@ -27,9 +19,7 @@ PENDING_LINES=0
 [[ -f "$BUFFER" ]] && BUFFER_LINES=$(wc -l < "$BUFFER" 2>/dev/null | tr -d ' ')
 [[ -f "$PENDING" ]] && PENDING_LINES=$(wc -l < "$PENDING" 2>/dev/null | tr -d ' ')
 
-if [[ $BUFFER_LINES -eq 0 && $PENDING_LINES -eq 0 ]]; then
-    kill $WATCHDOG 2>/dev/null; wait $WATCHDOG 2>/dev/null; exit 0
-fi
+[[ $BUFFER_LINES -eq 0 && $PENDING_LINES -eq 0 ]] && exit 0
 
 # 确定 session
 SESSION_ID=""
@@ -69,21 +59,16 @@ cat > "${SESSION_DIR}/session.json" 2>/dev/null << SESSIONEOF
 }
 SESSIONEOF
 
-# 更新 index.json（2 秒超时）
-_update_index() {
-    local new_entry="{\"id\":\"${SESSION_ID}\",\"type\":\"auto\",\"last_updated\":\"${NOW}\",\"status\":\"in_progress\",\"total_records\":${TOTAL_RECORDS}}"
-
-    if [[ ! -f "$INDEX" ]]; then
-        echo "{\"entries\":[${new_entry}]}" > "$INDEX" 2>/dev/null
-        return
-    fi
-
-    if command -v python3 &>/dev/null; then
-        timeout 2 python3 -c "
+# 更新 index.json
+if command -v python3 &>/dev/null; then
+    python3 -c "
 import json
 try:
-    with open('$INDEX') as f:
-        idx = json.load(f)
+    idx = {'entries': []}
+    try:
+        with open('$INDEX') as f:
+            idx = json.load(f)
+    except: pass
     entries = idx.get('entries', [])
     found = False
     for e in entries:
@@ -96,16 +81,10 @@ try:
         entries.append({'id':'${SESSION_ID}','type':'auto','last_updated':'${NOW}','status':'in_progress','total_records':${TOTAL_RECORDS}})
     with open('$INDEX', 'w') as f:
         json.dump(idx, f, ensure_ascii=False, indent=2)
-except:
-    pass
+except: pass
 " 2>/dev/null
-    else
-        echo "{\"entries\":[${new_entry}]}" > "$INDEX" 2>/dev/null
-    fi
-}
-_update_index
+else
+    echo "{\"entries\":[{\"id\":\"${SESSION_ID}\",\"type\":\"auto\",\"last_updated\":\"${NOW}\",\"status\":\"in_progress\",\"total_records\":${TOTAL_RECORDS}}]}" > "$INDEX" 2>/dev/null
+fi
 
-# 清理 watchdog
-kill $WATCHDOG 2>/dev/null
-wait $WATCHDOG 2>/dev/null
 exit 0
