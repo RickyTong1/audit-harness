@@ -2,41 +2,42 @@
 # ============================================================
 # PostToolUse Hook: 自动捕获工具调用审计
 # ============================================================
-# settings.json 的 matcher 已限定只有 Write|Edit|Bash|NotebookEdit 触发。
-# 因此 hook 内部不再做工具过滤——只要被触发就记录。
-#
-# 不依赖 CLAUDE_TOOL_NAME 等环境变量（已知可能为空）。
-# 仅依赖 $PWD（始终可用）和 stdin（Claude Code 传入的 JSON，可能为空）。
+# 安全保证：
+#   - 不使用 set -e（任何命令失败都不终止脚本）
+#   - 所有操作包裹在超时和错误保护中
+#   - 整个脚本不会阻塞主流程
+#   - 最坏情况：静默退出，不记录本次操作（可接受）
 # ============================================================
+
+# 超时保护：整个脚本最多执行 2 秒
+( sleep 2 && kill -9 $$ 2>/dev/null ) &
+WATCHDOG=$!
 
 RUNS_DIR="${PWD}/.claude/runs"
 BUFFER="${RUNS_DIR}/audit_buffer.jsonl"
 
-# 自动初始化：runs/ 不存在则创建（全局生效，无需 --init）
-mkdir -p "$RUNS_DIR" 2>/dev/null
+mkdir -p "$RUNS_DIR" 2>/dev/null || { kill $WATCHDOG 2>/dev/null; exit 0; }
 
-TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "unknown")
 
-# 尝试读取 stdin（Claude Code 可能传入 tool 信息的 JSON）
+# 读 stdin：限制 2000 字节，1 秒超时
 STDIN_DATA=""
 if ! [ -t 0 ]; then
-    STDIN_DATA=$(head -c 2000)  # 限制读取量，防止阻塞
+    STDIN_DATA=$(timeout 1 head -c 2000 2>/dev/null || true)
 fi
 
-# 尝试从环境变量获取工具名（可能为空）
+# 提取工具名
 TOOL="${CLAUDE_TOOL_NAME:-}"
-FILES="${CLAUDE_FILE_PATHS:-}"
-
-# 如果环境变量为空，尝试从 stdin 解析
 if [[ -z "$TOOL" && -n "$STDIN_DATA" ]]; then
-    # 简单提取 tool_name（不依赖 jq）
-    TOOL=$(echo "$STDIN_DATA" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+    TOOL=$(echo "$STDIN_DATA" | grep -o '"tool_name":"[^"]*"' 2>/dev/null | head -1 | cut -d'"' -f4 2>/dev/null || true)
 fi
-
-# 如果还是拿不到工具名，用 "tool_use" 作为通用标记
 TOOL="${TOOL:-tool_use}"
 
-# 转义 stdin 中的引号用于 JSON
-ESCAPED_STDIN=$(echo "$STDIN_DATA" | tr '\n' ' ' | sed 's/"/\\"/g' | head -c 500)
+# 写入 buffer（转义简化，只取前 500 字符）
+DETAIL=$(echo "$STDIN_DATA" | tr '\n' ' ' | tr '"' "'" | head -c 500 2>/dev/null || true)
+echo "{\"timestamp\":\"${TIMESTAMP}\",\"tool\":\"${TOOL}\",\"detail\":\"${DETAIL}\"}" >> "$BUFFER" 2>/dev/null
 
-echo "{\"timestamp\":\"${TIMESTAMP}\",\"tool\":\"${TOOL}\",\"files\":\"${FILES}\",\"detail\":\"${ESCAPED_STDIN}\"}" >> "$BUFFER"
+# 清理 watchdog
+kill $WATCHDOG 2>/dev/null
+wait $WATCHDOG 2>/dev/null
+exit 0
