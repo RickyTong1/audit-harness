@@ -3,8 +3,9 @@
 > **日期**：2026-03-19
 > **级别**：L2（模块设计）
 > **优先级**：**最高** — 本模块是整个 Harness 的核心基础设施
-> **状态**：设计完成，待实施
+> **状态**：P0/P1 已实现，P2/P3 待实施
 > **上游文档**：`docs/L1_platform_blueprint.md` §8（可审计性架构）
+> **归属项目**：`audit-harness`（独立仓库 `/codes.nosync/audit-harness/`）。本文件在 data_distill 中保留一份引用副本，源文件在 audit-harness/docs/ 中维护。
 
 ---
 
