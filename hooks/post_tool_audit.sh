@@ -12,9 +12,7 @@
 RUNS_DIR="${PWD}/.claude/runs"
 BUFFER="${RUNS_DIR}/audit_buffer.jsonl"
 
-# 项目未初始化则跳过
-[[ -d "$RUNS_DIR" ]] || exit 0
-
+# 自动初始化：runs/ 不存在则创建（全局生效，无需 --init）
 mkdir -p "$RUNS_DIR" 2>/dev/null
 
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")

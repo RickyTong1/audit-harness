@@ -186,17 +186,40 @@ PYEOF
     _install_hooks_config "$settings" "$hooks_path"
     ok "settings.json hooks 已配置"
 
+    # --- 注入全局 CLAUDE.md ---
+    header "配置全局审计规范 → ~/.claude/CLAUDE.md"
+
+    local global_claude="$GLOBAL_DIR/CLAUDE.md"
+    local audit_section
+    audit_section=$(cat "$TEMPLATES_SRC/CLAUDE.md.audit-section")
+
+    if [[ ! -f "$global_claude" ]]; then
+        echo "$audit_section" > "$global_claude"
+        ok "创建 ~/.claude/CLAUDE.md（含审计规范）"
+    elif ! grep -q "\[AUDIT\]" "$global_claude" 2>/dev/null || ! grep -q "audit_pending" "$global_claude" 2>/dev/null; then
+        {
+            echo ""
+            echo "---"
+            echo ""
+            echo "$audit_section"
+        } >> "$global_claude"
+        ok "审计规范已追加到 ~/.claude/CLAUDE.md"
+    else
+        ok "~/.claude/CLAUDE.md 已包含审计规范"
+    fi
+
     # --- 总结 ---
     echo ""
     echo -e "${BOLD}============================================================${RESET}"
     echo -e "${GREEN}${BOLD}  全局安装完成！${RESET}"
     echo -e "${BOLD}============================================================${RESET}"
     echo ""
-    echo "  已安装:"
+    echo "  已安装（全局生效，所有项目无需额外配置）:"
     echo "    ~/.claude/audit-harness/        — 核心代码 + 模板"
-    echo "    ~/.claude/audit-harness/hooks/  — 3 个自动审计 Hooks"
-    echo "    ~/.claude/skills/               — 4 个 Skills（所有项目可用）"
+    echo "    ~/.claude/audit-harness/hooks/  — 3 个 Hooks（自动创建 .claude/runs/）"
+    echo "    ~/.claude/skills/               — 4 个 Skills"
     echo "    ~/.claude/settings.json         — Hooks 配置"
+    echo "    ~/.claude/CLAUDE.md             — 审计规范（[AUDIT] 格式 + Context 恢复）"
     echo ""
     echo "  Hooks 说明:"
     echo "    PostToolUse → 自动记录 Write/Edit/Bash 操作到 audit_buffer"

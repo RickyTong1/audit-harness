@@ -13,7 +13,8 @@ RUNS_DIR="${PWD}/.claude/runs"
 SESSION_FILE="${RUNS_DIR}/.current_session"
 INDEX="${RUNS_DIR}/index.json"
 
-[[ -d "$RUNS_DIR" ]] || exit 0
+# 自动初始化：runs/ 不存在则创建（全局生效，无需 --init）
+mkdir -p "$RUNS_DIR" 2>/dev/null
 
 # 读取当前 session
 SESSION_ID=""

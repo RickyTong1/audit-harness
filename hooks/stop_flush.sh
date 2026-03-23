@@ -16,8 +16,8 @@ PENDING="${RUNS_DIR}/audit_pending.jsonl"
 INDEX="${RUNS_DIR}/index.json"
 SESSION_FILE="${RUNS_DIR}/.current_session"
 
-# 如果 runs 目录不存在，跳过
-[[ -d "$RUNS_DIR" ]] || exit 0
+# 自动初始化：runs/ 不存在则创建（全局生效，无需 --init）
+mkdir -p "$RUNS_DIR" 2>/dev/null
 
 # 如果 buffer 和 pending 都是空的，什么都不做
 BUFFER_LINES=0
