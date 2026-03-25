@@ -1,0 +1,10 @@
+# 安装产物（install.sh 可能在包目录内测试时产生）
+.claude/runs/
+.claude/audit_config.py
+audit_context.py
+audit_config.py
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

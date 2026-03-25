@@ -1,0 +1,32 @@
+{
+  "version": "1.0.0",
+  "name": "audit-harness",
+  "description": "审计执行保障框架：为 AI Agent 提供三层审计防线、Context 恢复、审计驱动日报和自我修正闭环。",
+  "author": "RickyTong1",
+  "plugins": [
+    {
+      "id": "audit-start",
+      "name": "会话启动 + Context 恢复",
+      "description": "创建审计会话，自动恢复历史上下文",
+      "source": "./skills/audit-start"
+    },
+    {
+      "id": "audit-end",
+      "name": "会话结束 + 审计完整性检查",
+      "description": "汇总审计记录，检查完整性，保存到 runs/",
+      "source": "./skills/audit-end"
+    },
+    {
+      "id": "audit-recover",
+      "name": "Context 恢复",
+      "description": "从审计记录恢复丢失的上下文，优先恢复用户修正",
+      "source": "./skills/audit-recover"
+    },
+    {
+      "id": "audit-report-daily",
+      "name": "审计驱动日报",
+      "description": "基于 runs/ 审计数据自动生成工作日报",
+      "source": "./skills/audit-report-daily"
+    }
+  ]
+}

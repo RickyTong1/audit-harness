@@ -1,0 +1,81 @@
+# ============================================================
+# 以下内容粘贴到你的项目 CLAUDE.md 中
+# ============================================================
+
+## 审计规范
+
+### 存储位置
+```
+runs/{YYYYMMDD}_{HHMM}/
+├── manifest.json        # 批次清单
+├── audit_trail.jsonl    # 逐条审计追踪（完整 Record）
+├── audit_compact.jsonl  # 压缩审计行（正确样本）
+├── anomalies.json       # 异常检测结果
+└── checksums.json       # 所有文件的 SHA256
+```
+
+### 报告溯源
+日报/周报中的每个数字必须标注 `来源字段`（指向 manifest 路径）。
+
+### [AUDIT] 输出格式规范（强制）
+
+当你执行以下操作时，回复末尾**必须**附带 `[AUDIT]` 块：
+- 修改了任何代码或配置文件
+- 执行了数据处理或分析脚本
+- 得出了影响后续决策的分析结论
+- 修改了 Prompt / 规则 / 模型配置
+
+格式：
+```
+[AUDIT]
+batch: {batch_id 或 "adhoc_YYYYMMDD_HHMM"}
+action: {做了什么，一句话}
+input: {输入文件/数据集/样本数}
+output: {输出文件/结论/指标}
+hash_in: {输入标识，如有}
+hash_out: {输出标识，如有}
+```
+
+**没有 [AUDIT] 块的数据操作 = 未完成。** 这不是建议，是格式约束。
+
+### [AUDIT] 块持久化（强制）
+
+仅在回复中输出 [AUDIT] 块**不够**——context 压缩后会丢失。
+**每次输出 [AUDIT] 块时，必须同时用 Bash 追加到持久化文件：**
+
+```bash
+echo '{"batch":"SESSION_ID","action":"你做了什么","input":"输入","output":"输出","timestamp":"ISO8601"}' >> .claude/runs/audit_pending.jsonl
+```
+
+> Stop hook 会在每轮回复结束后自动将 `audit_pending.jsonl` 归档到当前 session 的审计文件中。
+> 你只需要写入 pending 文件，归档由 hook 自动完成。
+
+### 审计自动化说明
+
+以下 hooks 已自动配置，你不需要手动操作：
+- **PostToolUse hook**：每次 Write/Edit/Bash 操作后自动记录到 `audit_buffer.jsonl`
+- **Stop hook**：每轮回复结束后自动将 buffer + pending 归档到 session 审计文件 + 更新 index.json
+- **UserPromptSubmit hook**：每轮输入时自动注入当前 session_id，提醒你持久化 [AUDIT] 块
+
+### Context 恢复规则
+
+**新会话启动时**，如果 `runs/` 目录存在：
+1. 读取 `runs/index.json` 和最新的 daily report / morning review
+2. 输出上下文恢复摘要（最近活动 + 待解决问题 + 今日优先级）
+3. **优先加载所有 `user_correction` 类型的审计记录**（防止重犯已纠正的错误）
+4. 确认用户工作方向
+
+**Session 内检测到 context 丢失时**：
+1. **不要凭印象继续工作**，立即读取当前 session 的 `audit_blocks.jsonl`
+2. 优先恢复 `user_correction` 记录（⚠️ 最重要——丢了会重犯错误）
+3. 恢复后告知用户："我从审计记录恢复了以下上下文..."
+
+**绝对禁止**：
+- 在 context 丢失后"凭印象"工作
+- 假装记得之前的内容
+- 重复已被用户否定的判断——不确定就先查审计记录
+
+### 决策红线（通用）
+
+- **不要做任何猜测，除非有十足的把握**（超出数据支撑的推断 = 幻觉）
+- **今天正确不代表明天正确**（业务跟随客户变动，审计记录必须支持回溯性重新评估）
