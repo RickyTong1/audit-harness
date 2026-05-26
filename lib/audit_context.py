@@ -1,85 +1,110 @@
 """
 L3 | 审计执行保障基础模块
 用途：为所有 Skill 和 adhoc 操作提供统一的审计上下文（AuditContext），
-     包括 Record-Level 追踪、BatchManifest 生成、hashchain 校验、
-     异常检测、审计存储。
+     包括 Record-Level 追踪、BatchManifest 生成、异常检测、审计存储、
+     index.json 统一 schema 维护。
 
 输入：任何 Skill 或 adhoc 操作的执行上下文
-输出：runs/{batch_id}/ 下的 manifest.json, audit_trail.jsonl, anomalies.json
-
-关联文件：
-  - docs/L1_platform_blueprint.md §8    审计架构定义
-  - docs/L2_audit_enforcement_design.md 审计模块详细设计
-  - CLAUDE.md                           [AUDIT] 格式规范
+输出：.claude/runs/{batch_id}/ 下的 manifest.json, audit_trail.jsonl, anomalies.json
+关联：
+  - docs/L2_audit_enforcement_design.md  审计模块详细设计
+  - templates/audit_config.example.py    项目配置模板（业务规则、关键脚本）
+  - templates/CLAUDE.md.audit-section    [AUDIT] 格式规范
+  - hooks/                               PostToolUse / Stop / UserPromptSubmit
+                                         通过 update_index_entry() 与 lib 共享 schema
 """
 from __future__ import annotations
 
-import glob
 import hashlib
+import importlib.util
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 # ==========================================
-# 配置
+# 版本
 # ==========================================
 
-AUDIT_SCHEMA_VERSION = "1.0"
+AUDIT_SCHEMA_VERSION = "1.1"
+INDEX_SCHEMA_VERSION = "1.1"
 
-PROJECT_ROOT = Path(__file__).parent
-RUNS_DIR = PROJECT_ROOT / "runs"
 
-# 关键脚本——环境快照时计算这些文件的哈希
-# 通过项目根目录的 audit_config.py 覆盖
+# ==========================================
+# 路径解析（运行时定位，lib 与 hooks 共享）
+# ==========================================
+
+def find_runs_dir(start: Path | str | None = None) -> Path:
+    """从给定目录（默认 CWD）上溯，查找最近的 ``.claude/runs/``。
+
+    找不到时返回 ``CWD/.claude/runs``（不创建）。这与 hooks
+    ``${PWD}/.claude/runs`` 的行为保持一致——审计数据始终归属当前项目。
+    """
+    cur = (Path(start) if start else Path.cwd()).resolve()
+    for p in [cur, *cur.parents]:
+        candidate = p / ".claude" / "runs"
+        if candidate.is_dir():
+            return candidate
+    return cur / ".claude" / "runs"
+
+
+def find_project_root(start: Path | str | None = None) -> Path:
+    """``find_runs_dir`` 的祖父目录。"""
+    return find_runs_dir(start).parent.parent
+
+
+# ==========================================
+# 项目配置加载（audit_config.py）
+# ==========================================
+
+# 默认值——项目可通过 audit_config.py 覆盖（见 templates/audit_config.example.py）
 CORE_SCRIPTS: list[str] = []
-
-# 关键模型/配置文件
 CORE_ASSETS: list[str] = []
+PROMPT_TEMPLATE_GLOB: str = ""
+ALERT_RULES: list[dict] = []
 
-# prompt 模板 glob 模式
-PROMPT_TEMPLATE_GLOB = ""
 
-# 告警规则（通过 audit_config.py 覆盖）
-ALERT_RULES: list[dict] = [
-    # 示例：
-    # {
-    #     "id": "input_empty_rate",
-    #     "condition": lambda m: m.get("input", {}).get("empty_rate", 0) > 0.55,
-    #     "level": "CRITICAL",
-    #     "message": "输入空率超过 55%",
-    # },
-    {
-        "id": "cleaning_delete_rate",
-        "condition": lambda m: _safe_div(
-            m.get("cleaning", {}).get("total_deleted", 0),
-            m.get("cleaning", {}).get("total_input", 1),
-        ) > 0.15,
-        "level": "WARNING",
-        "message": "清洗删除率超过 15%",
-    },
-    {
-        "id": "flag_rate",
-        "condition": lambda m: _safe_div(
-            m.get("screening", {}).get("flagged", 0),
-            m.get("screening", {}).get("total_screened", 1),
-        ) > 0.30,
-        "level": "WARNING",
-        "message": "人审量超过 30%",
-    },
-    {
-        "id": "output_integrity",
-        "condition": lambda m: (
-            m.get("output", {}).get("total_records") is not None
-            and m.get("cleaning", {}).get("total_input") is not None
-            and m.get("cleaning", {}).get("total_deleted") is not None
-            and m["output"]["total_records"]
-            != m["cleaning"]["total_input"] - m["cleaning"]["total_deleted"]
-        ),
-        "level": "CRITICAL",
-        "message": "输出记录数 ≠ 输入 - 删除，存在数据丢失",
-    },
-]
+def _load_project_config(start: Path | str | None = None) -> Path | None:
+    """加载 ``audit_config.py``，覆盖模块级默认值。
+
+    查找顺序：
+      1. ``<project_root>/.claude/audit_config.py``
+      2. ``<project_root>/audit_config.py``
+
+    返回成功加载的文件路径，未加载则返回 ``None``。
+    """
+    global CORE_SCRIPTS, CORE_ASSETS, PROMPT_TEMPLATE_GLOB, ALERT_RULES
+
+    root = find_project_root(start)
+    candidates = [
+        root / ".claude" / "audit_config.py",
+        root / "audit_config.py",
+    ]
+
+    for cfg_path in candidates:
+        if not cfg_path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("audit_config", cfg_path)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+
+            CORE_SCRIPTS = list(getattr(mod, "CORE_SCRIPTS", CORE_SCRIPTS))
+            CORE_ASSETS = list(getattr(mod, "CORE_ASSETS", CORE_ASSETS))
+            PROMPT_TEMPLATE_GLOB = str(getattr(mod, "PROMPT_TEMPLATE_GLOB", PROMPT_TEMPLATE_GLOB))
+            ALERT_RULES = list(getattr(mod, "ALERT_RULES", ALERT_RULES))
+            return cfg_path
+        except Exception as e:
+            print(f"[audit_context] warning: failed to load {cfg_path}: {e}",
+                  file=sys.stderr)
+            continue
+    return None
+
+
+_load_project_config()
 
 
 # ==========================================
@@ -94,9 +119,14 @@ def _safe_div(a, b):
     return a / b if b else 0
 
 
+def _resolve(path: str | Path) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else find_project_root() / p
+
+
 def hash_file(path: str | Path) -> str | None:
-    """计算文件的 SHA256 哈希。文件不存在返回 None。"""
-    p = PROJECT_ROOT / path if not Path(path).is_absolute() else Path(path)
+    """计算文件 SHA256；不存在返回 None。"""
+    p = _resolve(path)
     if not p.exists():
         return None
     h = hashlib.sha256()
@@ -111,8 +141,13 @@ def hash_bytes(data: bytes) -> str:
 
 
 def hash_dir(dir_path: str | Path, pattern: str = "*.jsonl") -> str | None:
-    """对目录下所有匹配文件按名称排序后计算联合哈希。"""
-    p = PROJECT_ROOT / dir_path if not Path(dir_path).is_absolute() else Path(dir_path)
+    """对目录下匹配文件按名称排序后计算联合哈希。
+
+    使用 NUL 分隔符区分文件名与内容、不同文件之间，
+    避免 ``name1+content1+name2`` 与 ``name1+content1name2`` 产生同哈希的
+    拼接歧义。
+    """
+    p = _resolve(dir_path)
     if not p.is_dir():
         return None
     files = sorted(p.glob(pattern))
@@ -120,30 +155,91 @@ def hash_dir(dir_path: str | Path, pattern: str = "*.jsonl") -> str | None:
         return None
     h = hashlib.sha256()
     for f in files:
-        h.update(f.name.encode())
+        h.update(b"\x00FILE\x00")
+        h.update(f.name.encode("utf-8"))
+        h.update(b"\x00DATA\x00")
         with open(f, "rb") as fh:
             for chunk in iter(lambda: fh.read(8192), b""):
                 h.update(chunk)
+        h.update(b"\x00END\x00")
     return h.hexdigest()
 
 
 def _find_prompt_template() -> str | None:
-    """查找当前 prompt 模板文件路径。"""
     if not PROMPT_TEMPLATE_GLOB:
         return None
-    matches = list(PROJECT_ROOT.glob(PROMPT_TEMPLATE_GLOB))
-    return str(matches[0].relative_to(PROJECT_ROOT)) if matches else None
+    root = find_project_root()
+    matches = list(root.glob(PROMPT_TEMPLATE_GLOB))
+    return str(matches[0].relative_to(root)) if matches else None
 
 
 # ==========================================
-# RecordAudit: 单条记录的审计条目
+# Index Schema（lib 与 hooks 共享）
+# ==========================================
+
+# 一条 entry 的合法字段。hooks 通过 update_index_entry() 写入，
+# 必须遵守这套 schema，避免 hooks 与 lib 写出两套不兼容的数据。
+INDEX_ENTRY_REQUIRED = ("id", "type", "status")
+INDEX_ENTRY_OPTIONAL = (
+    "task", "skill", "created", "last_updated",
+    "record_count", "anomaly_count", "max_anomaly_level",
+)
+
+
+def update_index_entry(runs_dir: str | Path, entry: dict) -> Path:
+    """在 ``runs_dir/index.json`` 中 upsert 一条 entry。
+
+    - 同 id 已存在 → 合并字段（新值覆盖、未提供字段保留）
+    - 不存在 → 追加
+    - 原子写入（先写 .tmp 再 rename）
+
+    Returns:
+        index.json 文件路径
+    """
+    runs_dir = Path(runs_dir)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    index_path = runs_dir / "index.json"
+
+    if "id" not in entry:
+        raise ValueError("index entry must have 'id' field")
+
+    if index_path.exists():
+        try:
+            with open(index_path, encoding="utf-8") as f:
+                idx = json.load(f)
+        except Exception:
+            idx = {}
+    else:
+        idx = {}
+
+    idx.setdefault("schema_version", INDEX_SCHEMA_VERSION)
+    idx.setdefault("entries", [])
+
+    found = False
+    for e in idx["entries"]:
+        if e.get("id") == entry["id"]:
+            e.update(entry)
+            found = True
+            break
+    if not found:
+        missing = [k for k in INDEX_ENTRY_REQUIRED if k not in entry]
+        if missing:
+            raise ValueError(f"new index entry missing required fields: {missing}")
+        idx["entries"].append(dict(entry))
+
+    tmp = index_path.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, index_path)
+    return index_path
+
+
+# ==========================================
+# RecordEntry: 单条记录的审计条目
 # ==========================================
 
 class RecordEntry:
-    """单条 Record-Level 审计条目。
-
-    用于追踪一条数据在某个处理步骤中的变化。
-    """
+    """单条 Record-Level 审计条目。"""
 
     __slots__ = ("record_id", "step", "rule", "action", "reason",
                  "before", "after", "timestamp", "extra")
@@ -161,9 +257,9 @@ class RecordEntry:
     ):
         self.record_id = record_id
         self.step = step          # "pull" | "clean" | "ai_classify" | "screen" | "export"
-        self.rule = rule          # 如 "Rule1_freq_filter"
+        self.rule = rule
         self.action = action      # "keep" | "delete" | "modify" | "flag"
-        self.reason = reason      # 人类可读原因
+        self.reason = reason
         self.before = before or {}
         self.after = after or {}
         self.timestamp = _now_iso()
@@ -186,13 +282,13 @@ class RecordEntry:
 
 
 # ==========================================
-# CompactRecord: 正确样本的压缩审计行
+# CompactRecord: 压缩审计行（正确样本）
 # ==========================================
 
 class CompactRecord:
     """正确样本的压缩审计行（~120 字节/条）。"""
 
-    __slots__ = ("record_id", "batch_id", "rule_hits", "disposition", "ml_score")
+    __slots__ = ("record_id", "batch_id", "rule_hits", "disposition", "score")
 
     def __init__(
         self,
@@ -200,13 +296,13 @@ class CompactRecord:
         batch_id: str,
         rule_hits: str,
         disposition: str,
-        ml_score: float | None = None,
+        score: float | None = None,
     ):
         self.record_id = record_id
         self.batch_id = batch_id
-        self.rule_hits = rule_hits      # "0/0/0/0/0/0/0/0/0" 各规则触发标记
-        self.disposition = disposition  # "ai_accepted" | "human_review"
-        self.ml_score = ml_score
+        self.rule_hits = rule_hits
+        self.disposition = disposition
+        self.score = score
 
     def to_line(self) -> str:
         d = {
@@ -215,26 +311,9 @@ class CompactRecord:
             "rules": self.rule_hits,
             "disp": self.disposition,
         }
-        if self.ml_score is not None:
-            d["ml"] = round(self.ml_score, 4)
+        if self.score is not None:
+            d["score"] = round(self.score, 4)
         return json.dumps(d, ensure_ascii=False)
-
-
-# ==========================================
-# HashchainError
-# ==========================================
-
-class HashchainBroken(Exception):
-    """上下游 Skill 之间的 hashchain 校验失败。"""
-
-    def __init__(self, expected: str, actual: str, context: str = ""):
-        self.expected = expected
-        self.actual = actual
-        self.context = context
-        super().__init__(
-            f"Hashchain 断裂{(' (' + context + ')') if context else ''}。"
-            f"期望: {expected[:16]}..., 实际: {actual[:16]}..."
-        )
 
 
 # ==========================================
@@ -244,30 +323,14 @@ class HashchainBroken(Exception):
 class AuditContext:
     """Skill 或 adhoc 操作的审计上下文。
 
-    使用方式:
-        audit = AuditContext("/clean")
-        audit.snapshot_environment()
+    使用方式::
+
+        audit = create_batch_context("/clean")
         audit.set_input_hash(hash_dir("data_export"))
-
-        # 核心逻辑中调用 audit.record(...)
-        audit.record(RecordEntry(
-            record_id="abc123",
-            step="clean",
-            rule="Rule1_freq_filter",
-            action="delete",
-            reason="title matched keyword filter"
-        ))
-
-        # 正确样本用压缩格式
-        audit.record_compact(CompactRecord(
-            record_id="def456",
-            batch_id=audit.batch_id,
-            rule_hits="0/0/0/0/0/0/0/0/0",
-            disposition="ai_accepted",
-            ml_score=0.023,
-        ))
-
-        manifest = audit.finalize()
+        audit.record(RecordEntry(record_id="abc123", step="clean",
+                                 rule="freq_filter", action="delete",
+                                 reason="title 命中关键词"))
+        audit.finalize()
         audit.save()
     """
 
@@ -278,7 +341,7 @@ class AuditContext:
         batch_type: str = "batch",
     ):
         self.skill_name = skill_name
-        self.batch_type = batch_type  # "batch" | "adhoc"
+        self.batch_type = batch_type
         self.batch_id = batch_id or self._gen_batch_id()
         self.start_time = _now_iso()
         self.environment: dict = {}
@@ -286,16 +349,21 @@ class AuditContext:
         self.output_hash: str | None = None
         self.manifest: dict = {}
 
-        # 审计记录
         self._full_records: list[dict] = []
         self._compact_lines: list[str] = []
-
-        # manifest 附加数据 (由调用方填充)
         self.extra_manifest: dict = {}
 
-        # 确保 runs 目录存在
-        self._runs_dir = RUNS_DIR / self.batch_id
-        self._runs_dir.mkdir(parents=True, exist_ok=True)
+        self._runs_dir = find_runs_dir()
+        self._session_dir = self._runs_dir / self.batch_id
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def runs_dir(self) -> Path:
+        return self._runs_dir
+
+    @property
+    def session_dir(self) -> Path:
+        return self._session_dir
 
     def _gen_batch_id(self) -> str:
         prefix = "adhoc" if self.batch_type == "adhoc" else "batch"
@@ -304,19 +372,15 @@ class AuditContext:
     # ---------- 环境快照 ----------
 
     def snapshot_environment(self):
-        """快照当前环境配置：规则版本、模型哈希、脚本哈希。"""
+        """快照规则版本、模型哈希、脚本哈希、prompt 模板。"""
         prompt_path = _find_prompt_template()
         self.environment = {
             "audit_schema_version": AUDIT_SCHEMA_VERSION,
             "snapshot_time": _now_iso(),
             "prompt_template": prompt_path,
             "prompt_template_hash": hash_file(prompt_path) if prompt_path else None,
-            "core_script_hashes": {
-                s: hash_file(s) for s in CORE_SCRIPTS
-            },
-            "core_asset_hashes": {
-                a: hash_file(a) for a in CORE_ASSETS
-            },
+            "core_script_hashes": {s: hash_file(s) for s in CORE_SCRIPTS},
+            "core_asset_hashes": {a: hash_file(a) for a in CORE_ASSETS},
         }
 
     # ---------- 输入/输出哈希 ----------
@@ -330,7 +394,6 @@ class AuditContext:
     # ---------- 记录追踪 ----------
 
     def record(self, entry: RecordEntry | dict):
-        """追加一条完整的 Record-Level 审计条目。"""
         if isinstance(entry, RecordEntry):
             self._full_records.append(entry.to_dict())
         else:
@@ -340,7 +403,6 @@ class AuditContext:
             self._full_records.append(entry)
 
     def record_compact(self, compact: CompactRecord | str):
-        """追加一条压缩审计行（正确样本）。"""
         if isinstance(compact, CompactRecord):
             self._compact_lines.append(compact.to_line())
         else:
@@ -358,69 +420,9 @@ class AuditContext:
     def total_record_count(self) -> int:
         return self.full_record_count + self.compact_record_count
 
-    # ---------- Hashchain 校验 ----------
-
-    def verify_input_hashchain(self, previous_batch_id: str | None = None):
-        """校验输入数据的 hashchain 是否与上游 Skill 的输出一致。
-
-        Args:
-            previous_batch_id: 上游 batch 的 ID。如果为 None，尝试自动找最近的 batch。
-
-        Raises:
-            HashchainBroken: hashchain 不一致
-        """
-        if self.input_hash is None:
-            return  # 无输入哈希则跳过校验
-
-        prev_manifest = self._load_previous_manifest(previous_batch_id)
-        if prev_manifest is None:
-            return  # 无上游 manifest 则跳过
-
-        expected = prev_manifest.get("output_hash")
-        if expected is None:
-            return  # 上游没记录输出哈希
-
-        if expected != self.input_hash:
-            raise HashchainBroken(
-                expected=expected,
-                actual=self.input_hash,
-                context=f"上游 batch={prev_manifest.get('batch_id', '?')} → 当前 skill={self.skill_name}",
-            )
-
-    def _load_previous_manifest(self, batch_id: str | None = None) -> dict | None:
-        """加载上一个 batch 的 manifest。"""
-        if batch_id:
-            p = RUNS_DIR / batch_id / "manifest.json"
-            if p.exists():
-                with open(p) as f:
-                    return json.load(f)
-            return None
-
-        # 自动查找最近的 batch manifest
-        index_path = RUNS_DIR / "index.json"
-        if not index_path.exists():
-            return None
-        with open(index_path) as f:
-            index = json.load(f)
-        entries = index.get("entries", [])
-        # 找到最近的、已完成的、类型为 batch 的
-        batch_entries = [
-            e for e in entries
-            if e.get("type") == "batch" and e.get("status") == "completed"
-        ]
-        if not batch_entries:
-            return None
-        latest = max(batch_entries, key=lambda e: e.get("created", ""))
-        p = RUNS_DIR / latest["id"] / "manifest.json"
-        if p.exists():
-            with open(p) as f:
-                return json.load(f)
-        return None
-
     # ---------- 异常检测 ----------
 
     def check_anomalies(self, manifest: dict | None = None) -> list[dict]:
-        """基于 ALERT_RULES 检测异常。"""
         m = manifest or self.manifest
         anomalies = []
         for rule in ALERT_RULES:
@@ -433,55 +435,13 @@ class AuditContext:
                         "detected_at": _now_iso(),
                     })
             except Exception:
-                pass  # 条件计算出错时跳过该规则
+                continue
         return anomalies
-
-    # ---------- 对比上一批次 ----------
-
-    def diff_from_previous(self, previous_batch_id: str | None = None) -> dict:
-        """计算当前 manifest 与上一批次的差异。"""
-        prev = self._load_previous_manifest(previous_batch_id)
-        if prev is None:
-            return {"previous_batch": None, "note": "无上一批次数据"}
-
-        def _pct_change(curr, prev_val):
-            if prev_val is None or prev_val == 0:
-                return None
-            if curr is None:
-                return None
-            return f"{(curr - prev_val) / prev_val * 100:+.1f}%"
-
-        def _pp_change(curr, prev_val):
-            if curr is None or prev_val is None:
-                return None
-            return f"{(curr - prev_val) * 100:+.1f}pp"
-
-        m = self.manifest
-        p_input = prev.get("input", {})
-        c_input = m.get("input", {})
-
-        return {
-            "previous_batch": prev.get("batch_id"),
-            "volume_change": _pct_change(
-                c_input.get("records_pulled"),
-                p_input.get("records_pulled"),
-            ),
-            "input_empty_rate_change": _pp_change(
-                c_input.get("input_empty_rate"),
-                p_input.get("input_empty_rate"),
-            ),
-        }
 
     # ---------- Finalize ----------
 
     def finalize(self, **extra) -> dict:
-        """生成 BatchManifest。
-
-        调用方可以在 finalize 前通过 self.extra_manifest 填充额外字段
-        （如 input、cleaning、ai_classify、screening、output 等摘要）。
-        """
         self.extra_manifest.update(extra)
-
         self.manifest = {
             "audit_schema_version": AUDIT_SCHEMA_VERSION,
             "batch_id": self.batch_id,
@@ -499,104 +459,132 @@ class AuditContext:
             },
         }
         self.manifest.update(self.extra_manifest)
-
-        # 自签名
-        manifest_bytes = json.dumps(self.manifest, ensure_ascii=False, sort_keys=True).encode()
+        manifest_bytes = json.dumps(
+            self.manifest, ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
         self.manifest["manifest_hash"] = hash_bytes(manifest_bytes)
-
         return self.manifest
 
     # ---------- 持久化 ----------
 
-    def save(self):
-        """将审计数据保存到 runs/{batch_id}/ 目录。"""
-        self._runs_dir.mkdir(parents=True, exist_ok=True)
+    def save(self) -> Path:
+        """将审计数据保存到 ``runs/{batch_id}/`` 并更新 index.json。"""
+        self._session_dir.mkdir(parents=True, exist_ok=True)
 
-        # manifest.json
-        with open(self._runs_dir / "manifest.json", "w") as f:
+        with open(self._session_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(self.manifest, f, ensure_ascii=False, indent=2)
 
-        # audit_trail.jsonl (完整审计条目)
         if self._full_records:
-            with open(self._runs_dir / "audit_trail.jsonl", "w") as f:
+            with open(self._session_dir / "audit_trail.jsonl", "a", encoding="utf-8") as f:
                 for rec in self._full_records:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        # audit_compact.jsonl (压缩审计行)
         if self._compact_lines:
-            with open(self._runs_dir / "audit_compact.jsonl", "w") as f:
+            with open(self._session_dir / "audit_compact.jsonl", "a", encoding="utf-8") as f:
                 for line in self._compact_lines:
                     f.write(line + "\n")
 
-        # anomalies.json
         anomalies = self.check_anomalies()
-        with open(self._runs_dir / "anomalies.json", "w") as f:
+        with open(self._session_dir / "anomalies.json", "w", encoding="utf-8") as f:
             json.dump(anomalies, f, ensure_ascii=False, indent=2)
 
-        # checksums.json
         checksums = {}
-        for p in self._runs_dir.iterdir():
+        for p in self._session_dir.iterdir():
             if p.name != "checksums.json" and p.is_file():
                 checksums[p.name] = hash_file(p)
-        with open(self._runs_dir / "checksums.json", "w") as f:
+        with open(self._session_dir / "checksums.json", "w", encoding="utf-8") as f:
             json.dump(checksums, f, ensure_ascii=False, indent=2)
 
-        # 更新 index.json
-        self._update_index()
-
-        return self._runs_dir
-
-    def _update_index(self):
-        """更新 runs/index.json 索引。"""
-        index_path = RUNS_DIR / "index.json"
-        if index_path.exists():
-            with open(index_path) as f:
-                index = json.load(f)
-        else:
-            index = {"entries": []}
-
-        # 删除同 batch_id 的旧条目
-        index["entries"] = [
-            e for e in index["entries"] if e.get("id") != self.batch_id
-        ]
-
-        # 追加新条目
         entry = {
             "id": self.batch_id,
             "type": self.batch_type,
             "skill": self.skill_name,
             "created": self.start_time,
+            "last_updated": _now_iso(),
             "status": "completed",
             "record_count": self.total_record_count,
         }
-        anomalies = self.check_anomalies()
         if anomalies:
             entry["anomaly_count"] = len(anomalies)
-            entry["max_anomaly_level"] = max(
-                a["level"] for a in anomalies
-            )
-        index["entries"].append(entry)
+            entry["max_anomaly_level"] = max(a["level"] for a in anomalies)
+        update_index_entry(self._runs_dir, entry)
 
-        with open(index_path, "w") as f:
-            json.dump(index, f, ensure_ascii=False, indent=2)
+        return self._session_dir
 
 
 # ==========================================
-# 便捷工厂函数
+# 便捷工厂
 # ==========================================
 
 def create_batch_context(skill_name: str, batch_id: str | None = None) -> AuditContext:
-    """创建一个结构化批次的审计上下文。"""
     ctx = AuditContext(skill_name, batch_id, batch_type="batch")
     ctx.snapshot_environment()
     return ctx
 
 
 def create_adhoc_context(task_description: str) -> AuditContext:
-    """创建一个非结构化会话的审计上下文。"""
     ctx = AuditContext(
         skill_name=f"adhoc: {task_description}",
         batch_type="adhoc",
     )
     ctx.snapshot_environment()
     return ctx
+
+
+# ==========================================
+# CLI（供 hooks 调用，避免在 shell 中拼 python 源码）
+# ==========================================
+
+def _cli_update_index(argv: list[str]) -> int:
+    """命令行入口：``python3 audit_context.py update-index --runs-dir X --id Y ...``
+
+    所有 ``--key value`` 对会被收集为 entry 字段。``--record-count`` 会
+    自动转为 int。这样 hooks 不需要在 shell 中嵌入 Python 源码就能写
+    index.json，彻底消除变量注入风险。
+    """
+    runs_dir = None
+    entry: dict = {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--runs-dir":
+            runs_dir = argv[i + 1]
+            i += 2
+        elif a.startswith("--"):
+            key = a[2:].replace("-", "_")
+            val = argv[i + 1] if i + 1 < len(argv) else ""
+            if key in ("record_count", "anomaly_count"):
+                try:
+                    val = int(val)
+                except ValueError:
+                    val = 0
+            entry[key] = val
+            i += 2
+        else:
+            i += 1
+
+    if not runs_dir:
+        runs_dir = str(find_runs_dir())
+    update_index_entry(runs_dir, entry)
+    print(runs_dir)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:]) if argv is None else argv
+    if not argv:
+        print("usage: audit_context.py <command> [args]", file=sys.stderr)
+        print("  commands: update-index, find-runs-dir", file=sys.stderr)
+        return 2
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "update-index":
+        return _cli_update_index(rest)
+    if cmd == "find-runs-dir":
+        print(str(find_runs_dir()))
+        return 0
+    print(f"unknown command: {cmd}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

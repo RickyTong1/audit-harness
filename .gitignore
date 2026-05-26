@@ -3,8 +3,14 @@
 .claude/audit_config.py
 audit_context.py
 audit_config.py
+
+# update_index_entry() 原子写入临时文件
+*.json.tmp
+
+# Python
 __pycache__/
 *.pyc
 
 # macOS
 .DS_Store
+

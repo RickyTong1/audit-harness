@@ -2,7 +2,7 @@
   "version": "1.0.0",
   "name": "audit-harness",
   "description": "审计执行保障框架：为 AI Agent 提供三层审计防线、Context 恢复、审计驱动日报和自我修正闭环。",
-  "author": "RickyTong1",
+  "author": "Ricky Tong",
   "plugins": [
     {
       "id": "audit-start",
