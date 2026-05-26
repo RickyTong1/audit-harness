@@ -2,35 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-> Note: this `internal-codex` branch carries an extra Codex-platform feature
-> that is **not** in the public `opensource-clean` / `main` branch. See the
-> "Internal-only: Codex platform support" section under v3.4.0 below.
-
-## [3.4.0] - 2026-05-26
-
-### Internal-only: Codex platform support (`internal-codex` branch)
-Rebuilt the v3.3.1 Codex platform draft (previously in `stash@{0}`) on top of
-the new v3.4.0 hooks architecture. The old stash was incompatible with the
-new `_audit_common.sh` and shared-Python-CLI design.
-
-- **`install.sh --codex` flag**: switches `GLOBAL_DIR`, `DOT_DIR`,
-  `DOCS_FILE`, `HOOKS_IN_SETTINGS` in one shot. Claude Code path remains
-  the default and is unchanged.
-- **`_install_codex_hooks()`**: writes standalone `~/.codex/hooks.json`
-  with top-level `{"hooks": {...}}` (per
-  [Codex hooks spec](https://developers.openai.com/codex/hooks)), regex
-  matcher `^(Write|Edit|Bash|NotebookEdit)$`, and forces
-  `AUDIT_DOT_DIR=.codex` prefix on every command so hooks never leak data
-  into `.claude/runs/`.
-- **`AUDIT_DOT_DIR` env var honored in two places**: `_audit_common.sh`
-  uses it for `RUNS_DIR`; `lib/audit_context.py::find_runs_dir()` reads it
-  too, and additionally auto-probes both `.claude/runs` and `.codex/runs`
-  when the env var is unset.
-- **End-to-end verified**: `install.sh --codex --auto` passes 5/5 checks;
-  hook + lib both write to `.codex/runs/` without polluting `.claude/`;
-  Claude Code path unchanged (no `AUDIT_DOT_DIR` prefix leaks into
-  `settings.json`).
-
 ### Fixed (Linus-style review of v3.3.1)
 - **Path schizophrenia (P0)**: `lib/audit_context.py` wrote to `PROJECT_ROOT/runs`
   while hooks wrote to `${PWD}/.claude/runs`. New `find_runs_dir()` walks
