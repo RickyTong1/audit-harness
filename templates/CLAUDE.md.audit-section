@@ -41,10 +41,20 @@ hash_out: {输出标识，如有}
 ### [AUDIT] 块持久化（强制）
 
 仅在回复中输出 [AUDIT] 块**不够**——context 压缩后会丢失。
-**每次输出 [AUDIT] 块时，必须同时用 Bash 追加到持久化文件：**
+**每次输出 [AUDIT] 块时，必须同时用 Bash 追加到持久化文件。**
+
+具体命令在每轮对话开始时由 `UserPromptSubmit` hook 注入到你的上下文中
+（形如 `[audit-harness] session=adhoc_YYYYMMDD_HHMM ...`），里面包含当前
+session_id 的真值，**照抄粘贴即可**。
+
+如果上下文里看不到注入消息，则使用以下格式，把 `<SESSION_ID>` 替换为
+`.claude/runs/.current_session` 文件的内容、`<NOW>` 替换为当前 ISO 8601
+时间戳：
 
 ```bash
-echo '{"batch":"SESSION_ID","action":"你做了什么","input":"输入","output":"输出","timestamp":"ISO8601"}' >> .claude/runs/audit_pending.jsonl
+SESSION_ID=$(cat .claude/runs/.current_session)
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "{\"batch\":\"${SESSION_ID}\",\"action\":\"你做了什么\",\"input\":\"输入\",\"output\":\"输出\",\"timestamp\":\"${NOW}\"}" >> .claude/runs/audit_pending.jsonl
 ```
 
 > Stop hook 会在每轮回复结束后自动将 `audit_pending.jsonl` 归档到当前 session 的审计文件中。

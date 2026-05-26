@@ -1449,25 +1449,43 @@ def new_skill(args):
 | 优先级 | 任务 | 产出 | 状态 |
 |--------|------|------|------|
 | **P0** | CLAUDE.md 中实施 [AUDIT] 格式规范 | CLAUDE.md 更新 | ✅ 已完成 |
-| **P0** | 实现 AuditContext 基础类 | `audit_context.py` (350 行) | ✅ 已完成 |
+| **P0** | 实现 AuditContext 基础类 | `lib/audit_context.py` (~600 行) | ✅ 已完成 |
 | **P0** | 实现 3 个 Hooks（PostToolUse + Stop + UserPromptSubmit） | `~/.claude/audit-harness/hooks/` | ✅ 已完成 (v3.1.0) |
 | **P0** | 全局 CLAUDE.md 审计规范注入 | `~/.claude/CLAUDE.md` | ✅ 已完成 (v3.1.0) |
 | **P1** | 实现 /start + /end + /recover + /report-daily Skills | `~/.claude/skills/audit-*` | ✅ 已完成 (v3.2.0) |
-| **P1** | Skills 审查修复（路径统一 + 握手协议 + 不可执行步骤） | 7 个 P0-P2 问题 | ✅ 已完成 (v3.2.0) |
 | **P1** | install.sh 安装向导（全局+项目+智能模式） | `audit-harness/install.sh` | ✅ 已完成 (v2.1.0) |
-| **P1** | 改造 /pull Skill 接入审计 | `download.py` 改造 | ⬜ 待实施 |
-| **P1** | 改造 /clean Skill 接入审计 | `clean_data_v4.py` | ⬜ 待实施 |
-| **P2** | 改造 /audit Skill 接入审计 | `audit_filter_generic.py` 改造 | ⬜ 待实施 |
+| **P0** | 数据一致性修复（详见 §11.1） | lib/hooks 路径与 schema 统一 | ✅ 已完成 (v3.4.0) |
+| **P1** | 改造下游 Skill 接入审计 | 各业务项目独立维护 | ⬜ 跨项目工作，本仓库不维护 |
 | **P2** | 实现晨间自我修正 cron | cron 08:03 日报 + 08:05 晨间回顾 | ⬜ 待实施 |
-| **P3** | 实现 hashchain 校验 | AuditContext 扩展 | ⬜ 待实施 |
+| **P3** | 实现 hashchain 校验 | 基于 update_index_entry 重新设计 | ⬜ 待实施（旧死代码已删） |
 
-### 11.1 Skills 审查记录（2026-03-23）
+### 11.1 v3.4.0 数据一致性修复（2026-05-25）
 
-对 4 个全局 Skills + 3 个 Hooks 执行了 skill-creator 审查，发现 7 个问题：
+对 v3.3.1 全面审查，发现 v3.2.0 「Skills 审查修复」**只改了 Skills 与 hooks 的路径文本，
+lib/audit_context.py 与 install.sh 中的根因性 bug 未触及**。本次修复 7 个 P0/P1
+问题：
 
 | # | 级别 | 问题 | 修复 |
 |---|------|------|------|
-| 1 | P0 | 路径不一致：Skills 写 `runs/`，Hooks 写 `.claude/runs/` | 全部统一为 `.claude/runs/` |
+| 1 | P0 | `lib/audit_context.py` 用 `PROJECT_ROOT/runs`，hooks 用 `${PWD}/.claude/runs` — 审计数据写到两个目录 | 新增 `find_runs_dir()`，lib 与 hooks 都从 CWD 上溯查找 `.claude/runs` |
+| 2 | P0 | install.sh 生成的 `audit_config.py` 从未被 lib 加载 — `grep audit_config lib/` 零匹配 | lib 顶部 `_load_project_config()`，按 `.claude/audit_config.py` → `audit_config.py` 顺序自动加载 |
+| 3 | P0 | `index.json` 两套 schema：lib 写 `created/record_count`、hooks 写 `last_updated/total_records` | 抽出 `update_index_entry()` + `python3 audit_context.py update-index` CLI，lib 与 hooks 共用 |
+| 4 | P0 | install.sh 调用未定义函数 `warn` + `((var++))` 在 `set -e` 下当 var=0 时退出 | 新增 `warn()` + 改用 `var=$((var + 1))` |
+| 5 | P1 | `hash_dir()` 拼接 name+content 无分隔符 → 拼接歧义 | 加入 `\x00FILE\x00 / \x00DATA\x00 / \x00END\x00` 分隔符 |
+| 6 | P1 | `post_tool_audit.sh` 用 `dd bs=1 count=8000` — 8000 次 syscall + JSON 超长被截断 | 改 `head -c 1048576` |
+| 7 | P1 | `stop_flush.sh` / `prompt_inject_session.sh` 把 shell 变量拼到 `python3 -c` 源码 — 工作目录含引号则崩溃 | 全部改用 `python3 - <<'PYEOF'` + argv 传值 |
+| 8 | P1 | `CLAUDE.md.audit-section` 中 `"batch":"SESSION_ID"` 被 Agent 当作字面字符串照抄 | 说明：实际命令由 `prompt_inject_session.sh` 注入；如需手写则用 `$(cat .current_session)` |
+| 9 | P2 | `verify_input_hashchain` + `_load_previous_manifest` 永远 silent skip（type 字段不匹配） | 整体删除死代码；待 hashchain 重新设计时基于 `update_index_entry()` 实现 |
+| 10 | P2 | `_install_hooks_config` 重复检测粒度太粗（只看子串"audit"），且非幂等 | 改用 hook 脚本 basename 作为唯一标识，存在则替换 |
+
+### 11.2 历史 Skills 审查记录（2026-03-23，v3.2.0）
+
+对 4 个全局 Skills + 3 个 Hooks 执行 skill-creator 审查，发现 7 个文档/路径问题，
+**仅修了 Skill/hook 文本**——底层 lib 的数据结构 bug 见 §11.1 #1-#3：
+
+| # | 级别 | 问题 | 修复 |
+|---|------|------|------|
+| 1 | P0 | 路径文本不一致：Skills 写 `runs/`，Hooks 写 `.claude/runs/` | Skills 文本统一为 `.claude/runs/`（lib 未改，遗留至 v3.4.0） |
 | 2 | P0 | /start 不写 `.current_session` → Stop hook 归档目标脱节 | 新增 `.current_session` 写入 + 解释握手协议 |
 | 3 | P0 | /end "扫描对话历史"不可执行（Skill 无法访问对话历史） | 改为读取 hooks 产出的 `audit_buffer` + `audit_pending` + `audit_trail` |
 | 4 | P0 | /report-daily 依赖不存在的 `manifest.json` | 重写数据源为 hooks 实际产出的文件 |

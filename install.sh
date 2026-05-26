@@ -34,6 +34,7 @@ BOLD='\033[1m'    DIM='\033[2m'      RESET='\033[0m'
 
 ok()     { echo -e "    ${GREEN}✅${RESET} $*"; }
 fail()   { echo -e "    ${RED}❌${RESET} $*"; }
+warn()   { echo -e "    ${YELLOW}⚠️${RESET}  $*"; }
 header() { echo -e "\n${BOLD}--- $* ---${RESET}\n"; }
 
 # ==========================================
@@ -159,7 +160,7 @@ PYEOF
 
         local short_name="${name#audit-}"
         ok "/$short_name → ~/.claude/skills/$name"
-        ((installed++))
+        installed=$((installed + 1))
     done
     echo ""
     echo "    已安装 $installed 个 Skills（全局可用）"
@@ -170,11 +171,12 @@ PYEOF
     local hooks_dst="$install_dir/hooks"
     mkdir -p "$hooks_dst"
 
+    cp "$HARNESS_ROOT/hooks/_audit_common.sh" "$hooks_dst/"
     cp "$HARNESS_ROOT/hooks/post_tool_audit.sh" "$hooks_dst/"
     cp "$HARNESS_ROOT/hooks/stop_flush.sh" "$hooks_dst/"
     cp "$HARNESS_ROOT/hooks/prompt_inject_session.sh" "$hooks_dst/"
     chmod +x "$hooks_dst"/*.sh
-    ok "3 个 Hooks 已安装"
+    ok "3 个 Hooks 已安装（+ _audit_common.sh 共享 helper）"
 
     # --- 配置 settings.json hooks ---
     header "配置 Hooks → ~/.claude/settings.json"
@@ -290,17 +292,35 @@ audit_hooks = {
 }
 
 # 合并：保留用户已有的 hooks，追加 audit hooks
+# 幂等性策略：以 hook 脚本 basename 作为唯一标识（如 post_tool_audit.sh）
+import re
+AUDIT_HOOK_SCRIPTS = {"post_tool_audit.sh", "stop_flush.sh", "prompt_inject_session.sh"}
+
+def _hook_script_name(cmd):
+    m = re.search(r"([a-zA-Z0-9_]+\.sh)", cmd)
+    return m.group(1) if m else ""
+
 existing_hooks = settings.get("hooks", {})
 for event, hook_list in audit_hooks.items():
     if event not in existing_hooks:
         existing_hooks[event] = hook_list
-    else:
-        # 检查是否已有 audit hook（避免重复安装）
-        existing_cmds = [h.get("hooks", [{}])[0].get("command", "") for h in existing_hooks[event]]
-        for new_hook in hook_list:
-            new_cmd = new_hook.get("hooks", [{}])[0].get("command", "")
-            if not any("audit" in c for c in existing_cmds):
-                existing_hooks[event].append(new_hook)
+        continue
+    for new_hook in hook_list:
+        new_cmd = new_hook.get("hooks", [{}])[0].get("command", "")
+        new_script = _hook_script_name(new_cmd)
+        if not new_script:
+            continue
+        existing_cmds = [h.get("hooks", [{}])[0].get("command", "")
+                         for h in existing_hooks[event]]
+        # 替换同名脚本（如果命令路径变了）；不存在则追加
+        replaced = False
+        for i, ec in enumerate(existing_cmds):
+            if _hook_script_name(ec) == new_script:
+                existing_hooks[event][i] = new_hook
+                replaced = True
+                break
+        if not replaced:
+            existing_hooks[event].append(new_hook)
 
 settings["hooks"] = existing_hooks
 
@@ -477,10 +497,10 @@ GITIGNORE
 
     _verify() {
         local label="$1"; shift
-        ((total++))
+        total=$((total + 1))
         if "$@" 2>/dev/null; then
             ok "$label"
-            ((passed++)) || true
+            passed=$((passed + 1))
         else
             fail "$label"
         fi
