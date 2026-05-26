@@ -52,17 +52,18 @@ bash /path/to/audit-harness/install.sh
 ### 三层防线
 
 ```
-层 1：Skill 硬编码（100% 可靠）
-  → /start、/end 内置审计逻辑
-  → Skill 间 hashchain 校验
+层 1：Skill 硬编码（结构化任务，100% 可靠）
+  → AuditContext 内置 record/finalize/save 流程
+  → /start、/end 会话级审计
 
-层 2：[AUDIT] 输出格式规范（~90% 可靠）
+层 2：[AUDIT] 输出格式规范（非结构化任务，~90% 可靠）
   → CLAUDE.md 规定回复必须包含 [AUDIT] 块
   → 格式约束 > 行为建议
 
-层 3：/start + /end 会话包裹（兜底检测）
-  → /end 检查审计完整性
-  → 发现遗漏则告警
+层 3：Hooks 自动兜底（黑盒拦截，~100% 可靠）
+  → PostToolUse 自动记录工具调用到 audit_buffer.jsonl
+  → Stop 自动归档 buffer + pending 到 session 审计文件
+  → UserPromptSubmit 自动注入 session_id
 ```
 
 ### Context 恢复
@@ -129,12 +130,14 @@ ALERT_RULES = [
 
 告警规则和核心脚本列表让框架适配你的业务领域，无需修改核心引擎。
 
+> v3.4.0 起，`audit_context.py` 启动时按 `<project>/.claude/audit_config.py` → `<project>/audit_config.py` 顺序自动加载并覆盖默认值。修改 `audit_config.py` 立即生效。
+
 ## 设计哲学
 
 1. **今天正确不代表明天正确** — 业务跟随客户变动。正确样本也保留审计，支持回溯性重新评估。
-2. **每个 pipeline node 都是一个 Record** — hashchain 是 Agent 间信任链的基础。
-3. **完善、轻量、可迭代、可扩展** — 正确样本压缩存储；审计结构版本化。
-4. **审计即记忆** — 审计记录是 Agent 的外部持久化存储，context 丢失时的唯一可靠恢复来源。
+2. **审计即记忆** — 审计记录是 Agent 的外部持久化存储，context 丢失时的唯一可靠恢复来源。
+3. **数据结构第一** — `index.json` schema 单一定义（v1.1），lib 与 hooks 共享，杜绝双写不一致。
+4. **完善、轻量、可迭代、可扩展** — 正确样本压缩存储；审计结构版本化。
 
 ## 安装模式
 
