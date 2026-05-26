@@ -36,17 +36,27 @@ INDEX_SCHEMA_VERSION = "1.1"
 # ==========================================
 
 def find_runs_dir(start: Path | str | None = None) -> Path:
-    """从给定目录（默认 CWD）上溯，查找最近的 ``.claude/runs/``。
+    """从给定目录（默认 CWD）上溯，查找最近的 ``{platform}/runs/``。
 
-    找不到时返回 ``CWD/.claude/runs``（不创建）。这与 hooks
-    ``${PWD}/.claude/runs`` 的行为保持一致——审计数据始终归属当前项目。
+    平台目录名按以下优先级解析：
+      1. 环境变量 ``AUDIT_DOT_DIR``（显式指定，如 ``.claude`` 或 ``.codex``）
+      2. 上溯路径中第一个存在的 ``.claude/runs`` 或 ``.codex/runs``
+      3. 找不到时，默认创建 ``CWD/.claude/runs``
+
+    这与 hooks ``${PWD}/${AUDIT_DOT_DIR:-.claude}/runs`` 的行为保持一致，
+    确保 lib 与 hooks 在同一项目目录下永远写到同一份审计数据。
     """
     cur = (Path(start) if start else Path.cwd()).resolve()
+    explicit = os.environ.get("AUDIT_DOT_DIR", "").strip()
+    candidates_basename = [explicit] if explicit else [".claude", ".codex"]
+
     for p in [cur, *cur.parents]:
-        candidate = p / ".claude" / "runs"
-        if candidate.is_dir():
-            return candidate
-    return cur / ".claude" / "runs"
+        for basename in candidates_basename:
+            candidate = p / basename / "runs"
+            if candidate.is_dir():
+                return candidate
+    default_basename = explicit or ".claude"
+    return cur / default_basename / "runs"
 
 
 def find_project_root(start: Path | str | None = None) -> Path:
