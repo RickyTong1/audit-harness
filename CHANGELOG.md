@@ -2,8 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [3.4.0] - 2026-05-26
-
 ### Fixed (Linus-style review of v3.3.1)
 - **Path schizophrenia (P0)**: `lib/audit_context.py` wrote to `PROJECT_ROOT/runs`
   while hooks wrote to `${PWD}/.claude/runs`. New `find_runs_dir()` walks

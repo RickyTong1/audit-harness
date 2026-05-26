@@ -9,19 +9,23 @@
 # 共享同一份 schema 定义。
 # ============================================================
 
-# RUNS_DIR：始终基于 ${PWD}/.claude/runs，与 lib 的 find_runs_dir() 行为一致
-RUNS_DIR="${PWD}/.claude/runs"
+# RUNS_DIR：基于 ${PWD}/${AUDIT_DOT_DIR:-.claude}/runs
+# AUDIT_DOT_DIR 由平台决定：Claude Code → .claude，OpenAI Codex → .codex
+# 与 lib 的 find_runs_dir() 行为保持一致（lib 也读 AUDIT_DOT_DIR 环境变量）
+RUNS_DIR="${PWD}/${AUDIT_DOT_DIR:-.claude}/runs"
 
 # AUDIT_PY：定位 audit_context.py
-#   全局安装：~/.claude/audit-harness/audit_context.py
-#               hooks 在 ~/.claude/audit-harness/hooks/，向上一级即可
-#   开发态：  audit-harness/lib/audit_context.py
+#   全局安装 Claude：~/.claude/audit-harness/audit_context.py
+#   全局安装 Codex： ~/.codex/audit-harness/audit_context.py
+#   hooks 与 lib 同在 audit-harness/，向上一级即可
+#   开发态：         audit-harness/lib/audit_context.py
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 AUDIT_PY=""
 for _p in \
     "${_HOOK_DIR}/../audit_context.py" \
     "${_HOOK_DIR}/../lib/audit_context.py" \
-    "${HOME}/.claude/audit-harness/audit_context.py"
+    "${HOME}/.claude/audit-harness/audit_context.py" \
+    "${HOME}/.codex/audit-harness/audit_context.py"
 do
     if [[ -f "$_p" ]]; then
         AUDIT_PY="$_p"
