@@ -8,6 +8,18 @@ allowed-tools:
   - Grep
 ---
 
+<!--
+L3 | audit-recover Skill
+用途：从 runs/ + engram 双源恢复丢失的 context，优先恢复用户修正记录
+输入：.claude/runs/{session}/ + engram vault（correction/surface/recall）
+输出：Context 恢复报告（标注来源: engram/runs/）
+关联：
+  - docs/L2_engram_memory_integration.md §5.2（recover 双源恢复）
+  - docs/L2_audit_enforcement_design.md §9（Context 恢复机制）
+  - skills/audit-start/SKILL.md（启动时恢复）
+版本：v4.0.0 — 全面改为双源恢复
+-->
+
 # /recover — Context 恢复
 
 ## 触发方式
@@ -41,14 +53,21 @@ allowed-tools:
 
 ## 执行步骤
 
-### 分级加载
+### 分级加载（双源：runs/ + engram）
 
-按以下优先级渐进加载，避免一次性占满 context：
+按以下优先级渐进加载，避免一次性占满 context。engram 调用失败时退化为纯 runs/ 模式。
 
-**Level 0 — 索引摘要（~200 tokens）**
+**Level 0 — 用户修正（最高优先级，同时查双源）**
 
 ```
-读取 .claude/runs/index.json → 最近 5 条 entry 的 id + task + status
+# engram 侧（跨项目、跨会话）
+engram_recall(context = "user corrections", topics = ["correction"], limit = 10)
+
+# runs/ 侧（当前项目、结构化证据）
+在 .claude/runs/ 下所有 audit_trail.jsonl 中搜索 "user_correction"
+
+→ 合并去重，标注来源（engram / runs/）
+→ "用户否定了什么——这些不得违反"
 ```
 
 **Level 1 — 任务状态（~500 tokens）**
@@ -60,36 +79,49 @@ allowed-tools:
 → "当前做到哪了"
 ```
 
-**Level 2 — 用户修正 + 决策上下文（~1,000 tokens）⚠️ 最重要**
+**Level 2 — 相关经验（engram 主动推送）**
 
 ```
-在 .claude/runs/ 下所有 audit_trail.jsonl 中搜索 "user_correction"
-搜索所有 conclusions 字段
+# 主动推送当前任务相关的记忆
+engram_surface(
+  context = "正在恢复 context: {session.task}",
+  activeEntities = [当前项目涉及的实体],
+  activeTopics = ["project:{项目名}"]
+)
+
+# 搜索相关结论
+engram_recall(context = "{session.task}", topics = ["conclusion"], limit = 5)
+
+# runs/ 侧补充
 读取最新 .claude/runs/daily/ 下的日报 §四异常 + §六待办
-→ "用户否定了什么、得出了什么结论、有什么未解决的问题"
+→ "有什么未解决的问题"
 ```
 
-**Level 3 — 完整上下文（~3,000 tokens，仅在 /recover full 时加载）**
+**Level 3 — 完整上下文（仅在 /recover full 时加载）**
 
 ```
 完整的 audit_trail.jsonl
 完整的 audit_pending.jsonl（如果还有未归档的）
+engram_recall(context = "{session.task}", topics = [], limit = 20)  ← 跨项目全局搜
 ```
 
 ### 输出恢复报告
 
 ```
 === Context 恢复报告 ===
-来源: .claude/runs/{session_id}/
-恢复级别: Level 2
+来源: runs/{session_id}/ + engram vault
+恢复级别: Level {N}
 
 当前任务: {session.task}
 任务状态: {最后一个 audit 记录的 output}
 
 ⚠️ 用户修正记录（必须遵守）:
-  1. [时间] 原始判断: "..."
+  1. [{来源: engram/runs}] 原始判断: "..."
      修正: "..."
      原则: ...
+
+engram 相关经验:
+  - [{来源项目}] {相关记忆内容}
 
 关键结论:
   - ...
@@ -97,7 +129,7 @@ allowed-tools:
 未解决问题:
   - ...
 
-⚠️ 以上内容从审计记录恢复，不是从记忆中回忆的。
+⚠️ 以上内容从审计记录 + engram vault 恢复，不是从记忆中回忆的。
 ```
 
 ## 注意事项

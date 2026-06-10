@@ -54,12 +54,15 @@ while [[ $# -gt 0 ]]; do
         --global) MODE="global"; shift ;;
         --init)   MODE="init";   shift ;;
         --auto)   MODE="auto";   shift ;;
+        --cron)   MODE="cron";   shift ;;
         --help|-h)
             echo "用法:"
             echo "  bash install.sh                         智能模式（自动判断）"
             echo "  bash install.sh --global                仅全局安装"
             echo "  bash install.sh --init [project_dir]    仅项目初始化（默认当前目录）"
             echo "  bash install.sh --auto [project_dir]    全局 + 项目初始化"
+            echo "  bash install.sh --cron [project_dir]    配置每日 08:03 launchd 定时（macOS）"
+            echo "                                          并把项目注册进 daily_projects.conf"
             echo ""
             echo "无参数时自动判断："
             echo "  全局未安装 → 全局安装 + 当前目录项目初始化"
@@ -80,10 +83,10 @@ if [[ -z "$MODE" ]]; then
 fi
 
 # 项目路径：默认当前工作目录
-if [[ "$MODE" == "init" || "$MODE" == "auto" ]]; then
+if [[ "$MODE" == "init" || "$MODE" == "auto" || "$MODE" == "cron" ]]; then
     PROJECT="${PROJECT:-$(pwd)}"
     PROJECT="$(cd "$PROJECT" && pwd)"
-    if [[ "$PROJECT" == "$HARNESS_ROOT" ]]; then
+    if [[ "$MODE" != "cron" && "$PROJECT" == "$HARNESS_ROOT" ]]; then
         echo -e "${RED}错误: 不能安装到 audit-harness 包自身。${RESET}"
         echo "  请在项目目录中运行，或指定目标路径:"
         echo "    cd /your/project && bash $HARNESS_ROOT/install.sh"
@@ -188,6 +191,10 @@ PYEOF
     _install_hooks_config "$settings" "$hooks_path"
     ok "settings.json hooks 已配置"
 
+    # --- 安装 engram 集成（可选，缺依赖时跳过不报错） ---
+    header "安装 engram 集成 → ~/.claude/audit-harness/engram/"
+    install_engram "$install_dir"
+
     # --- 注入全局 CLAUDE.md ---
     header "配置全局审计规范 → ~/.claude/CLAUDE.md"
 
@@ -219,9 +226,11 @@ PYEOF
     echo "  已安装（全局生效，所有项目无需额外配置）:"
     echo "    ~/.claude/audit-harness/        — 核心代码 + 模板"
     echo "    ~/.claude/audit-harness/hooks/  — 3 个 Hooks（自动创建 .claude/runs/）"
+    echo "    ~/.claude/audit-harness/engram/ — engram wrapper + consolidation"
     echo "    ~/.claude/skills/               — 4 个 Skills"
     echo "    ~/.claude/settings.json         — Hooks 配置"
     echo "    ~/.claude/CLAUDE.md             — 审计规范（[AUDIT] 格式 + Context 恢复）"
+    echo "    mcp.json                        — engram MCP server（如检测到 engram CLI）"
     echo ""
     echo "  Hooks 说明:"
     echo "    PostToolUse → 自动记录 Write/Edit/Bash 操作到 audit_buffer"
@@ -232,6 +241,144 @@ PYEOF
     echo "    bash install.sh --init /path/to/your/project"
     echo ""
     echo -e "${BOLD}============================================================${RESET}"
+}
+
+# ============================================================
+# engram 集成（L2_engram §11.1.4）
+# 铁律：engram 是可选依赖——任何检测失败都只 warn 不中断安装
+# ============================================================
+install_engram() {
+    local install_dir="$1"
+    local engram_dst="$install_dir/engram"
+
+    # 1. 复制 wrapper（无论 engram 是否安装都复制——后装 engram 即可用）
+    mkdir -p "$engram_dst"
+    cp "$LIB_SRC/engram/client.py" "$engram_dst/"
+    cp "$LIB_SRC/engram/wrapper.sh" "$engram_dst/"
+    cp "$LIB_SRC/engram/consolidate_llm.py" "$engram_dst/"
+    chmod +x "$engram_dst/wrapper.sh"
+    ok "engram wrapper（client.py + wrapper.sh + consolidate_llm.py）"
+
+    # 2. 检测 engram CLI
+    local engram_bin
+    engram_bin="$(command -v engram || true)"
+    if [[ -z "$engram_bin" ]]; then
+        warn "engram CLI 未安装，跳过 MCP 配置（安装后重跑 install.sh --global 即可）"
+        return 0
+    fi
+    ok "engram CLI: $engram_bin"
+
+    # 3. 检测 Ollama + embedding 模型（只 warn，不阻断 MCP 配置）
+    local embed_model="${ENGRAM_OLLAMA_MODEL:-qwen3-embedding:4b}"
+    local embed_dims="${ENGRAM_OLLAMA_DIMS:-2560}"
+    if curl -s --max-time 2 "http://localhost:11434/api/tags" 2>/dev/null | grep -q "\"$embed_model\""; then
+        ok "Ollama embedding 模型: $embed_model（$embed_dims dims）"
+    else
+        warn "Ollama 未运行或缺 $embed_model（语义检索将退化为关键词匹配）"
+        warn "  修复: ollama pull $embed_model"
+    fi
+
+    # 4. 写入 MCP 配置（幂等：已有 engram 配置则保留用户的，绝不覆盖）
+    if ! command -v python3 &>/dev/null; then
+        warn "无 python3，请手动在 mcp.json 中配置 engram server"
+        return 0
+    fi
+    local mcp_file
+    for mcp_file in "$HOME/.cursor/mcp.json" "$GLOBAL_DIR/.mcp.json"; do
+        python3 - "$mcp_file" "$engram_bin" "$embed_model" "$embed_dims" << 'PYEOF'
+import json, os, sys
+
+mcp_path, engram_bin, model, dims = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+config = {}
+if os.path.exists(mcp_path):
+    try:
+        with open(mcp_path) as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        print(f"    [skip] {mcp_path} 解析失败，不修改")
+        sys.exit(0)
+
+# 两种布局：mcpServers 包裹（~/.cursor/mcp.json）或顶层即 servers（~/.claude/.mcp.json）
+if "mcpServers" in config:
+    target = config["mcpServers"]
+elif config:
+    target = config
+else:
+    target = config.setdefault("mcpServers", {})
+if "engram" in target:
+    print(f"    [keep] {mcp_path} 已有 engram 配置（保留用户配置）")
+    sys.exit(0)
+
+target["engram"] = {
+    "command": engram_bin,
+    "args": ["mcp"],
+    "env": {
+        "ENGRAM_OLLAMA_MODEL": model,
+        "ENGRAM_OLLAMA_DIMS": dims,
+        "PATH": os.path.dirname(engram_bin) + ":/usr/local/bin:/usr/bin:/bin",
+    },
+}
+os.makedirs(os.path.dirname(mcp_path), exist_ok=True)
+with open(mcp_path, "w") as f:
+    json.dump(config, f, indent=2, ensure_ascii=False)
+print(f"    [add] {mcp_path} engram server 已配置")
+PYEOF
+    done
+    ok "MCP 配置完成（~/.cursor/mcp.json + ~/.claude/.mcp.json）"
+}
+
+# ============================================================
+# cron 模式：每日 08:03 日报 + 晨间修正 + engram consolidate
+# ============================================================
+install_cron() {
+    echo ""
+    echo -e "${BOLD}============================================================${RESET}"
+    echo -e "${BOLD}  audit-harness 每日定时配置（launchd）${RESET}"
+    echo -e "${BOLD}============================================================${RESET}"
+    echo ""
+
+    if [[ "$(uname)" != "Darwin" ]]; then
+        fail "cron 模式当前仅支持 macOS（launchd）。Linux 请手动配置 crontab:"
+        echo "    3 8 * * * bash $GLOBAL_DIR/audit-harness/bin/audit_daily.sh"
+        exit 1
+    fi
+
+    local install_dir="$GLOBAL_DIR/audit-harness"
+    if [[ ! -f "$install_dir/audit_context.py" ]]; then
+        fail "全局未安装，先执行: bash install.sh --global"
+        exit 1
+    fi
+
+    # 1. 安装 bin/audit_daily.sh
+    mkdir -p "$install_dir/bin" "$install_dir/logs"
+    cp "$HARNESS_ROOT/bin/audit_daily.sh" "$install_dir/bin/"
+    chmod +x "$install_dir/bin/audit_daily.sh"
+    ok "bin/audit_daily.sh → ~/.claude/audit-harness/bin/"
+
+    # 2. 注册项目到 daily_projects.conf（幂等）
+    local conf="$install_dir/daily_projects.conf"
+    touch "$conf"
+    if grep -qxF "$PROJECT" "$conf" 2>/dev/null; then
+        ok "项目已注册: $PROJECT"
+    else
+        echo "$PROJECT" >> "$conf"
+        ok "项目已注册: $PROJECT"
+    fi
+
+    # 3. 生成并加载 launchd plist
+    local plist="$HOME/Library/LaunchAgents/com.audit-harness.daily.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    sed "s|__HARNESS_DIR__|$install_dir|g" \
+        "$TEMPLATES_SRC/com.audit-harness.daily.plist" > "$plist"
+    launchctl unload "$plist" 2>/dev/null || true
+    launchctl load "$plist"
+    ok "launchd 已加载: com.audit-harness.daily（每天 08:03）"
+
+    echo ""
+    echo "  验证: launchctl list | grep audit-harness"
+    echo "  日志: ~/.claude/audit-harness/logs/daily_YYYYMMDD.log"
+    echo "  手动触发测试: bash $install_dir/bin/audit_daily.sh"
+    echo ""
 }
 
 # 配置 settings.json 中的 hooks
@@ -607,5 +754,8 @@ case "$MODE" in
         install_global
         echo ""
         init_project
+        ;;
+    cron)
+        install_cron
         ;;
 esac

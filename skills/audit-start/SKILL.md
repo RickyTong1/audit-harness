@@ -10,6 +10,19 @@ allowed-tools:
   - Write
 ---
 
+<!--
+L3 | audit-start Skill
+用途：创建审计会话，从 runs/ + engram 双源恢复历史上下文，按任务类型路由记忆源
+输入：用户任务描述 → .claude/runs/index.json + engram vault
+输出：runs/{session}/session.json + .current_session + 恢复摘要
+关联：
+  - docs/L2_engram_memory_integration.md §5（读取管道设计）
+  - docs/L2_audit_enforcement_design.md §6.1（/start 详细设计）
+  - skills/audit-end/SKILL.md（结束侧）
+  - hooks/prompt_inject_session.sh（session_id 注入）
+版本：v4.0.0 — §2 改为双源恢复 + 任务类型路由
+-->
+
 # /start — 审计会话启动 + Context 恢复
 
 ## 触发方式
@@ -57,16 +70,35 @@ echo "${SESSION_ID}" > .claude/runs/.current_session
 > Stop hook 读取此文件来确定 audit_buffer 归档到哪个 session 目录。
 > 如果不写这个文件，Stop hook 会创建一个 `auto_` session，与 /start 的 session 脱节。
 
-### 2. Context 恢复（如果 .claude/runs/ 目录存在历史数据）
+### 2. Context 恢复（双源：runs/ + engram）
 
-按以下优先级加载：
+从两个数据源恢复上下文，**冲突时以 runs/ 为准**（engram 有损）。engram 调用失败时静默跳过，不影响启动流程。
+
+#### 2a. engram 全局记忆（先于 runs/，提供跨项目视角）
+
+```
+# 1. 全局 briefing —— 待办、修正、告警
+engram_briefing(context = "即将开始: {任务描述}")
+
+# 2. 检查待处理告警
+engram_alerts(staleDays = 3, limit = 5)
+
+# 3. 按任务类型路由：
+#    - 如果任务含"修复"/"bug"/"fix" → 跨项目召回相关经验
+#      engram_recall(context = "{任务描述}", topics = [], limit = 10)
+#    - 如果任务含"设计"/"plan"/"方案"/"架构" → 主动推送
+#      engram_surface(context = "{任务描述}", activeTopics = ["project:{项目名}"])
+#    - 其他日常任务 → 只拉本项目
+#      engram_recall(context = "{任务描述}", topics = ["project:{项目名}"], limit = 5)
+
+# 4. 最高优先级：用户修正记忆
+engram_recall(context = "user corrections", topics = ["correction"], limit = 10)
+```
+
+#### 2b. runs/ 本项目记录（事实层，最终权威）
 
 **Level 0 — 索引摘要**:
 - 读取 `.claude/runs/index.json`，获取最近 5 条 entry 的 id + task + status
-
-**Level 2 — 用户修正（最重要）**:
-- 在最近的 `audit_trail.jsonl` 和 `audit_blocks.jsonl` 中搜索 `user_correction`
-- 这些记录必须最先恢复——丢了会重犯错误
 
 **Level 1 — 任务状态**:
 - 读取最新的 `.claude/runs/daily/*_daily.md`（如果存在）
@@ -74,6 +106,10 @@ echo "${SESSION_ID}" > .claude/runs/.current_session
   - §六 昨日待办：有没有未完成的任务？
   - §七 明日待办：今天该优先做什么？
 - 读取最新的 `.claude/runs/daily/*_morning_review.md`（如果存在）
+
+**Level 2 — 用户修正（runs/ 侧补充）**:
+- 在最近的 `audit_trail.jsonl` 中搜索 `user_correction`
+- 与 engram 召回的修正记录合并去重
 
 **检查未完成会话**:
 - 扫描 `.claude/runs/adhoc_*/session.json`，找 `status: "in_progress"` 的会话
@@ -84,20 +120,21 @@ echo "${SESSION_ID}" > .claude/runs/.current_session
 ```
 审计会话已创建: adhoc_20260320_1400
 任务: {用户的任务描述}
+项目: {项目名}
 
-上下文恢复摘要（基于 .claude/runs/ 审计记录）：
+上下文恢复（runs/ + engram）：
 
-最近活动：
+最近活动（runs/）：
   - {最近 3 条完成的任务}
 
-⚠️ 用户修正记录（必须遵守）：
-  - {所有 user_correction 记录}
+⚠️ 用户修正记录（必须遵守，来源标注 runs/engram）：
+  - {合并去重后的所有 correction 记录}
 
-待解决问题：
-  - {未关闭的异常/告警}
+engram 洞察：
+  - {briefing/surface/recall 返回的相关经验，标注来源项目}
 
-今日推荐优先级：
-  - {morning_review 中的推荐}
+待解决问题（runs/ + engram_alerts）：
+  - {合并后的未关闭异常/待办}
 
 预期 Record 类型：
   [数据] / [变更] / [对话] — 根据任务描述预判

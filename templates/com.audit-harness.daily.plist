@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+L3 | templates/com.audit-harness.daily.plist — launchd 定时模板
+用途：每天 08:03 触发 audit_daily.sh（日报 + 晨间修正 + engram consolidate）
+占位符：__HARNESS_DIR__ 由 install.sh 的 cron 模式替换为 ~/.claude/audit-harness 绝对路径
+关联：bin/audit_daily.sh（执行入口）、install.sh install_cron()（安装逻辑）
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.audit-harness.daily</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__HARNESS_DIR__/bin/audit_daily.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>3</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__HARNESS_DIR__/logs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HARNESS_DIR__/logs/launchd.log</string>
+</dict>
+</plist>

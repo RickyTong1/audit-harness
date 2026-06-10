@@ -29,9 +29,10 @@ bash ~/src/audit-harness/install.sh
 ### 进阶用法
 
 ```bash
-bash install.sh --global              # 仅全局安装
+bash install.sh --global              # 仅全局安装（含 engram MCP 自动配置）
 bash install.sh --init [project_dir]  # 仅项目初始化（默认当前目录）
 bash install.sh --auto [project_dir]  # 全局 + 项目初始化
+bash install.sh --cron [project_dir]  # 注册项目到每日 08:03 自动日报（macOS launchd）
 ```
 
 ### 定制项目配置
@@ -62,13 +63,14 @@ ALERT_RULES = [
 
 ## 包含内容
 
-### Skills（4 个，全局安装到 `~/.claude/skills/`）
+### Skills（4 个全局安装到 `~/.claude/skills/` + 1 个仅插件分发）
 
 | Skill | 命令 | 作用 |
 |-------|------|------|
-| audit-start | `/start "任务描述"` | 创建审计会话 + 自动恢复历史 context |
-| audit-end | `/end` | 汇总审计 + 完整性检查 + 保存 |
-| audit-recover | `/recover` | 从审计记录恢复丢失的 context |
+| audit-init | `/audit-init` | 交互式安装向导（与 install.sh 等价，仅 plugin 模式分发，不进全局） |
+| audit-start | `/start "任务描述"` | 创建审计会话 + 双源恢复历史 context（runs/ + engram） |
+| audit-end | `/end` | 汇总审计 + 完整性检查 + 保存 + 单向写入 engram |
+| audit-recover | `/recover` | 从 runs/ + engram 双源恢复丢失的 context |
 | audit-report-daily | `/report-daily` | 基于审计数据生成工作日报 |
 
 ### Hooks（3 个，全局安装到 `~/.claude/audit-harness/hooks/`）
@@ -86,6 +88,10 @@ ALERT_RULES = [
 | 文件 | 作用 |
 |------|------|
 | `lib/audit_context.py` | AuditContext、RecordEntry、CompactRecord、索引 schema、CLI 入口 |
+| `lib/engram/client.py` | engram MCP 结构化客户端（JSON-RPC over stdio） |
+| `lib/engram/wrapper.sh` | engram bash CLI 封装（供 hooks/脚本调用） |
+| `lib/engram/consolidate_llm.py` | 本地 LLM（qwen3:8b）语义提炼，替代云端 API |
+| `bin/audit_daily.sh` | 每日审计闭环入口：日报 + 晨间修正 + consolidation |
 
 ### 模板
 
@@ -93,6 +99,7 @@ ALERT_RULES = [
 |------|------|
 | `templates/audit_config.example.py` | 项目配置模板（CORE_SCRIPTS、ALERT_RULES 等） |
 | `templates/CLAUDE.md.audit-section` | CLAUDE.md 审计规范模板 |
+| `templates/com.audit-harness.daily.plist` | launchd 每日 08:03 定时模板 |
 
 ## 架构概览
 
@@ -132,17 +139,42 @@ ALERT_RULES = [
   → UserPromptSubmit 自动注入 session_id
 ```
 
-### Context 恢复
+### Context 恢复（双源：runs/ + engram）
 
 ```
-新 session 启动 → /start 自动加载 index.json + 最近 daily report
-Session 内压缩 → Agent 主动调用 /recover
+新 session 启动 → /audit-start 自动加载：
+  1. engram_briefing + engram_alerts → 全局上下文
+  2. engram_recall(topics=["correction"]) → 用户修正（跨项目）
+  3. runs/index.json + daily report → 本项目事实
+  4. 按任务类型路由：bug fix → engram 跨项目搜经验；日常 → runs/ 为准
 
-恢复优先级：
-  🔴 用户修正 (user_correction) — 最先恢复，丢了会重犯错误
+Session 内压缩 → Agent 主动调用 /audit-recover
+  engram_surface → 主动推送 + runs/ audit_trail → 事实校准
+
+恢复优先级（不变）：
+  🔴 用户修正 (engram correction + runs/ user_correction) — 最先恢复
   🟡 任务状态 — 做到哪了
   🟢 分析结论 — 得出了什么
   ⚪ 环境配置 — 什么版本的规则/模型
+```
+
+### Engram 集成（v4.0.0）
+
+```
+runs/ (事实层, WORM)          engram (语义层, 有损)
+  │                              ▲
+  │  /audit-end 单向写入          │
+  └──────────────────────────────┘
+
+铁律：
+  1. runs/ 永远是真相，engram 是派生索引
+  2. engram 写入失败不阻断审计
+  3. 数据 Record / CompactRecord 永不进 engram
+
+跨项目隔离（topic 约定）：
+  project:{name}  — 项目专属
+  cross-project   — 全局共享（偏好、修正、红线）
+  correction      — 用户修正（salience=0.9）
 ```
 
 ### Record 类型
@@ -158,9 +190,10 @@ Session 内压缩 → Agent 主动调用 /recover
 ## 设计哲学
 
 1. **今天正确不代表明天正确** — 正确样本也保留审计，支持回溯重新评估
-2. **审计即记忆** — 审计记录是 Agent 的外部持久化存储，context 丢失时的恢复来源
+2. **审计即记忆** — runs/ 是 WORM 事实层，engram 是语义层；双层协同，各司其职
 3. **数据结构第一** — index.json schema 单一定义，lib 与 hooks 共享，杜绝双写不一致
 4. **完善、轻量、可迭代、可扩展** — 正确样本压缩存储，审计结构版本化
+5. **记忆后端可替换** — Skills 通过 MCP 工具名调用 engram，不嵌入内部逻辑；换 Mem0/Zep/Letta 只需换 MCP 适配器
 
 ## 许可
 
